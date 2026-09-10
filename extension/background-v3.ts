@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   manualEnabled: false,
   autoBoost: false,
   liveCounter: true,
-  counterIntervalSec: 10,
+  counterIntervalSec: 5,
   verifyAfterPressSec: 3,
   activeCheckSec: 1.5,
   cooldownSafetySec: 2,
@@ -64,6 +64,12 @@ let activeOcrProfile: OcrCropProfile | undefined;
 let lastViewport: OcrViewport | undefined;
 let counterMisses = 0;
 let boostMisses = 0;
+let lastCounterReadAt = 0;
+let lastBoostReadAt = 0;
+let lastFullReadAt = 0;
+let boostCooldownReadyAt: number | undefined;
+let boostWakeAt: number | undefined;
+let liveRefreshFlight: Promise<void> | null = null;
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -72,7 +78,7 @@ function errorText(error: unknown): string {
 }
 
 function log(message: string, level: DiagnosticEntry["level"] = "info") {
-  diagnostics = [{ at: new Date().toISOString(), level, message }, ...diagnostics].slice(0, 100);
+  diagnostics = [{ at: new Date().toISOString(), level, message }, ...diagnostics].slice(0, 300);
 }
 
 async function ensureLoaded() {
@@ -86,7 +92,7 @@ async function ensureLoaded() {
 function sanitizeSettings(next: ExtensionSettings): ExtensionSettings {
   return {
     ...next,
-    counterIntervalSec: Math.min(60, Math.max(5, Number(next.counterIntervalSec) || 10)),
+    counterIntervalSec: Math.min(60, Math.max(5, Number(next.counterIntervalSec) || 5)),
     verifyAfterPressSec: Math.min(10, Math.max(1, Number(next.verifyAfterPressSec) || 3)),
     activeCheckSec: Math.min(5, Math.max(0.75, Number(next.activeCheckSec) || 1.5)),
     cooldownSafetySec: Math.min(10, Math.max(0, Number(next.cooldownSafetySec) || 2)),
@@ -183,10 +189,31 @@ async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrRe
   });
 }
 
+function skillText(skill: SkillStateSnapshot): string {
+  if (skill.state === "cooldown") return `${skill.cooldownSeconds ?? "?"}s`;
+  return skill.state;
+}
+
+function setChoppingSkill(skill: SkillStateSnapshot) {
+  const previous = skillText(choppingSkill);
+  const next = skillText(skill);
+  setChoppingSkill(skill);
+  lastBoostReadAt = Date.now();
+  if (currentSnapshot) {
+    currentSnapshot.chopping = { ...(currentSnapshot.chopping || {}), skill };
+  }
+  if (skill.state === "ready" || skill.state === "active") {
+    boostCooldownReadyAt = undefined;
+    boostWakeAt = undefined;
+  }
+  if (previous !== next) log(`Chopping state updated: ${previous} → ${next}.`);
+}
+
 function applySnapshot(snapshot: SidebarSnapshot) {
   currentSnapshot = snapshot;
+  lastFullReadAt = Date.now();
   if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined);
-  if (snapshot.chopping?.skill) choppingSkill = snapshot.chopping.skill;
+  if (snapshot.chopping?.skill) setChoppingSkill(snapshot.chopping.skill);
 }
 
 async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapshot> {
@@ -279,7 +306,7 @@ async function readBoost(): Promise<SkillStateSnapshot> {
   let skill = response.choppingSkill || { state: "unknown" as const };
   if (skill.state !== "unknown") {
     boostMisses = 0;
-    choppingSkill = skill;
+    setChoppingSkill(skill);
     return skill;
   }
 
@@ -293,7 +320,7 @@ async function readBoost(): Promise<SkillStateSnapshot> {
       if (skill.state !== "unknown") {
         activeOcrProfile = profile;
         boostMisses = 0;
-        choppingSkill = skill;
+        setChoppingSkill(skill);
         log(`Boost crop automatically recalibrated to ${profile}.`);
         return skill;
       }
@@ -306,18 +333,24 @@ async function readBoost(): Promise<SkillStateSnapshot> {
     boostMisses = 0;
   }
 
-  choppingSkill = skill;
+  setChoppingSkill(skill);
   return skill;
 }
 
 function updateCounter(value: number) {
   const now = Date.now();
-  if (lastCounter && value >= lastCounter.value && now > lastCounter.at) {
-    const delta = value - lastCounter.value;
-    rollingBps = delta / ((now - lastCounter.at) / 1000);
+  const previous = lastCounter;
+  if (previous && value >= previous.value && now > previous.at) {
+    const delta = value - previous.value;
+    rollingBps = delta / ((now - previous.at) / 1000);
   }
   lastCounter = { value, at: now };
+  lastCounterReadAt = now;
   if (currentSnapshot) currentSnapshot.blocksMined = value;
+  if (previous && value !== previous.value) {
+    const delta = value - previous.value;
+    log(`Blocks mined updated: ${previous.value.toLocaleString()} → ${value.toLocaleString()} (${delta >= 0 ? "+" : ""}${delta}).`);
+  }
 }
 
 function clearTimer(handle: number | undefined) {
@@ -389,16 +422,26 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function doubleE() {
-  // The side panel can own keyboard focus after the user changes a toggle.
-  // Bring the already-connected Bloxd target to the front before dispatching
-  // trusted DevTools-protocol key input. This does not click or move the mouse.
+async function pressEBurst(count: number, label: string) {
+  log(`${label}: attempting E ×${count}.`);
   await debuggerCommand("Page.bringToFront");
-  await delay(60);
-  await keyE();
-  await delay(settings.doubleTapGapMs);
-  await keyE();
-  log(`Focused Bloxd and sent E ×2 (${settings.doubleTapGapMs} ms gap).`);
+  try {
+    await debuggerCommand("Runtime.evaluate", {
+      expression: `(function(){const cs=[...document.querySelectorAll('canvas')].filter(c=>c.offsetWidth>0&&c.offsetHeight>0);const c=cs.sort((a,b)=>(b.offsetWidth*b.offsetHeight)-(a.offsetWidth*a.offsetHeight))[0];if(c){if(!c.hasAttribute('tabindex'))c.tabIndex=-1;c.focus({preventScroll:true});return 'canvas';}if(document.body){if(!document.body.hasAttribute('tabindex'))document.body.tabIndex=-1;document.body.focus({preventScroll:true});return 'body';}return 'page';})()`,
+      returnByValue: true
+    });
+    log(`${label}: Bloxd game surface focused.`);
+  } catch (error) {
+    log(`${label}: focus helper failed (${errorText(error)}); continuing with page focus.`, "warn");
+  }
+  await delay(80);
+  for (let i = 1; i <= count; i += 1) {
+    log(`${label}: pressing E ${i}/${count}…`);
+    await keyE();
+    log(`${label}: E ${i}/${count} pressed.`);
+    if (i < count) await delay(settings.doubleTapGapMs);
+  }
+  log(`${label}: E ×${count} completed.`);
 }
 
 function confirmBoostSuccess() {
@@ -410,14 +453,18 @@ function confirmBoostSuccess() {
 
 function scheduleCooldown(seconds: number) {
   boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
+  const now = Date.now();
   const sleepFor = seconds + settings.cooldownSafetySec;
-  log(`Cooldown read: ${seconds}s. Boost OCR sleeping for ${sleepFor}s.`);
+  boostCooldownReadyAt = now + seconds * 1000;
+  boostWakeAt = now + sleepFor * 1000;
+  setChoppingSkill({ state: "cooldown", cooldownSeconds: seconds, raw: choppingSkill.raw });
+  log(`Cooldown read: ${seconds}s. Local countdown is live; boost OCR sleeps until ${new Date(boostWakeAt).toLocaleTimeString()}.`);
   boostCycle = undefined;
   clearTimer(verifyTimer);
   clearTimer(activeTimer);
   clearTimer(recheckTimer);
   void chrome.alarms.clear(BOOST_WAKE).then(() => {
-    chrome.alarms.create(BOOST_WAKE, { when: Date.now() + sleepFor * 1000 });
+    chrome.alarms.create(BOOST_WAKE, { when: boostWakeAt });
   });
 }
 
@@ -425,7 +472,9 @@ async function beginBoostCycle() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined || boostCycle) return;
   boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0 };
   try {
-    await doubleE();
+    log("Chopping Ready confirmed. Starting primary E ×5 activation burst.");
+    await pressEBurst(5, "Primary boost input");
+    log(`Primary E ×5 finished. Verifying Chopping state in ${settings.verifyAfterPressSec}s.`);
     scheduleVerify();
   } catch (error) {
     boostCycle = undefined;
@@ -454,8 +503,9 @@ async function verifyBoostCycle() {
       if (!boostCycle.retryUsed) {
         boostCycle.retryUsed = true;
         boostTotals.activationRetries += 1;
-        log("Chopping still Ready after 3s; sending the single E ×2 retry.", "warn");
-        await doubleE();
+        log(`Chopping still Ready after ${settings.verifyAfterPressSec}s; starting backup E ×3 burst.`, "warn");
+        await pressEBurst(3, "Backup boost input");
+        log(`Backup E ×3 finished. Verifying again in ${settings.verifyAfterPressSec}s.`);
         scheduleVerify();
         return;
       }
@@ -530,11 +580,51 @@ async function maybeArmBoostFromSnapshot() {
   else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
   else if (observed.state === "active") scheduleActiveCheck();
   else {
-    // v0.3.0 could stop here forever when the first OCR read was unknown.
-    // Keep the watcher alive without sending any input until Chopping is
-    // positively identified as Ready/Active/cooldown.
     log(`Auto Boost waiting for a clear Chopping state; rechecking in ${settings.readyRetrySec}s.`, "warn");
     scheduleRecheck();
+  }
+}
+
+async function refreshLiveStateOnPoll() {
+  if (connectedTabId === undefined) return;
+  if (liveRefreshFlight) return liveRefreshFlight;
+  const flight = (async () => {
+    const now = Date.now();
+
+    if (settings.liveCounter && now - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
+      try {
+        const value = await readCounter();
+        if (value === undefined) log("Live counter refresh did not get a number; it will retry automatically.", "warn");
+      } catch (error) {
+        log(`Live counter refresh: ${errorText(error)}`, "warn");
+      }
+    }
+
+    const afterCounter = Date.now();
+    const boostSleeping = boostWakeAt !== undefined && afterCounter < boostWakeAt;
+    if (settings.autoBoost && !boostFault && !boostCycle && !boostSleeping && afterCounter - lastBoostReadAt >= 2000) {
+      try {
+        const observed = await readBoost();
+        if (observed.state === "ready") await beginBoostCycle();
+        else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
+        else if (observed.state === "active") scheduleActiveCheck();
+        else scheduleRecheck();
+      } catch (error) {
+        log(`Live Chopping refresh: ${errorText(error)}`, "warn");
+      }
+    }
+
+    if (Date.now() - lastFullReadAt >= 15_000 && !boostCycle) {
+      void readFullSnapshot(false)
+        .then(snapshot => log(`Full sidebar live refresh complete${snapshot.blocksMined !== undefined ? ` · ${snapshot.blocksMined.toLocaleString()} blocks` : ""}.`))
+        .catch(error => log(`Full sidebar live refresh: ${errorText(error)}`, "warn"));
+    }
+  })();
+  liveRefreshFlight = flight;
+  try {
+    await flight;
+  } finally {
+    if (liveRefreshFlight === flight) liveRefreshFlight = null;
   }
 }
 
@@ -558,6 +648,11 @@ async function disconnect(reason = "Disconnected") {
   lastViewport = undefined;
   counterMisses = 0;
   boostMisses = 0;
+  lastCounterReadAt = 0;
+  lastBoostReadAt = 0;
+  lastFullReadAt = 0;
+  boostCooldownReadyAt = undefined;
+  boostWakeAt = undefined;
   if (tabId !== undefined) {
     try { await chrome.debugger.detach({ tabId }); } catch { /* already detached */ }
   }
@@ -777,6 +872,17 @@ async function stopSession(): Promise<MiningSession> {
 function status(): LiveExtensionStatus {
   const now = Date.now();
   ocrReads = ocrReads.filter(at => now - at < 60_000);
+  let liveChoppingSkill = choppingSkill;
+  if (choppingSkill.state === "cooldown" && boostCooldownReadyAt !== undefined) {
+    liveChoppingSkill = {
+      ...choppingSkill,
+      cooldownSeconds: Math.max(0, Math.ceil((boostCooldownReadyAt - now) / 1000))
+    };
+  }
+  const liveSnapshot = currentSnapshot ? { ...currentSnapshot } : undefined;
+  if (liveSnapshot && liveChoppingSkill.state !== "unknown") {
+    liveSnapshot.chopping = { ...(liveSnapshot.chopping || {}), skill: liveChoppingSkill };
+  }
   return {
     ready: loaded,
     connected: connectedTabId !== undefined,
@@ -786,7 +892,7 @@ function status(): LiveExtensionStatus {
     phase: currentSnapshot?.phase,
     blocksMined: lastCounter?.value ?? currentSnapshot?.blocksMined,
     rollingBps,
-    choppingSkill,
+    choppingSkill: liveChoppingSkill,
     lastOcrConfidence,
     lastOcrMs,
     readsLastMinute: ocrReads.length,
@@ -798,7 +904,7 @@ function status(): LiveExtensionStatus {
     sessionStartBlocks: activeSession?.startSnapshot.blocksMined,
     boostFault,
     settings,
-    currentSnapshot,
+    currentSnapshot: liveSnapshot,
     diagnostics
   };
 }
@@ -818,13 +924,15 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
     activeTimer = undefined;
     recheckTimer = undefined;
     void chrome.alarms.clear(BOOST_WAKE);
+    boostCooldownReadyAt = undefined;
+    boostWakeAt = undefined;
   }
 
   if (settings.autoBoost && !previousAutoBoost) {
     boostFault = undefined;
     if (connectedTabId !== undefined) {
       try {
-        choppingSkill = await readBoost();
+        setChoppingSkill(await readBoost());
       } catch (error) {
         log(`Initial boost read: ${errorText(error)}`, "warn");
       }
@@ -842,6 +950,7 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
     switch (command.type) {
       case "GET_STATUS":
         await reconcileConnection();
+        await refreshLiveStateOnPoll();
         return { ok: true, status: status() };
       case "SET_SETTINGS":
         await setSettings(command.patch);
@@ -872,15 +981,15 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
       }
       case "TEST_E":
         if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
-        if (settings.autoBoost) throw new Error("Turn Auto-use Chopping skill OFF before using Test E ×2.");
-        log("Manual E ×2 input diagnostic requested.");
-        await doubleE();
+        if (settings.autoBoost) throw new Error("Turn Auto-use Chopping skill OFF before using Test E ×5.");
+        log("Manual E ×5 input diagnostic requested.");
+        await pressEBurst(5, "Manual input test");
         return { ok: true, status: status() };
       case "CLEAR_BOOST_FAULT":
         boostFault = undefined;
         boostCycle = undefined;
         if (settings.autoBoost && connectedTabId !== undefined) {
-          choppingSkill = await readBoost();
+          setChoppingSkill(await readBoost());
           await maybeArmBoostFromSnapshot();
         }
         return { ok: true, status: status() };
@@ -907,6 +1016,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== BOOST_WAKE) return;
+  boostWakeAt = undefined;
+  log("Cooldown wake alarm fired; checking Chopping state now.");
   void ensureLoaded().then(wakeBoost);
 });
 
