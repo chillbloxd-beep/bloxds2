@@ -71,6 +71,7 @@ export type BackgroundCommand =
   | { target: "background"; type: "SCAN_NOW" }
   | { target: "background"; type: "START_SESSION"; miningType: MiningType }
   | { target: "background"; type: "STOP_SESSION" }
+  | { target: "background"; type: "TEST_E" }
   | { target: "background"; type: "CLEAR_BOOST_FAULT" }
   | { target: "background"; type: "EMERGENCY_STOP" };
 

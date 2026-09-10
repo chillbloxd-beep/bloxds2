@@ -186,3 +186,7 @@ The current community endpoint analyzes up to the latest 10,000 eligible runs fo
 ## Runtime validation still required
 
 CI validates source compilation, parser tests, both production builds and the packaged OCR assets. Two behaviors still require a real Bloxd browser test before they can be called proven: OCR accuracy against the live rendered sidebar at the user's display scale, and whether Bloxd accepts the debugger-dispatched E input exactly as intended.
+
+### v0.3.1 Auto Boost bootstrap fix
+
+Auto Boost now keeps rechecking when the first Chopping OCR state is unknown instead of remaining idle. The first unknown boost crop immediately tries alternate calibrated crops. E dispatch brings the connected Bloxd target to the front and uses raw key-down input, which is better suited to game keyboard handlers. A **Test E ×2** diagnostic (available while Auto Boost is off) separates OCR/state-detection failures from keyboard-input failures.
