@@ -57,9 +57,28 @@ describe("boost state parsing", () => {
     expect(parseSkillState("Lucky: 100.0% | Skill: Active").state).toBe("active");
     expect(parseSkillState("Lucky: 100.0% | Skill: 157s")).toMatchObject({ state: "cooldown", cooldownSeconds: 157 });
     expect(parseChoppingFromText("Chopping 1000 []\nLucky: 100.0% | Skill: Ready").state).toBe("ready");
+    expect(parseChoppingFromText("Ch0pping 1000 []\nLucky: 100.0% | Skill: 157s")).toMatchObject({ state: "cooldown", cooldownSeconds: 157 });
   });
 
   it("does not convert unclear text into a false action state", () => {
     expect(parseSkillState("Lucky: 100.0% | Skill: ???").state).toBe("unknown");
+  });
+
+  it("never mistakes Digging or Gold Ready for Chopping Ready", () => {
+    const crop = `Digging 1000 []
+Lucky: 100.0% | Skill: Ready
+Farming 783 []
+Gold: 50.0% | Skill: Ready`;
+    expect(parseChoppingFromText(crop).state).toBe("unknown");
+  });
+
+  it("scopes the state to Chopping when neighboring skills are also Ready", () => {
+    const crop = `Digging 1000 []
+Lucky: 100.0% | Skill: Ready
+Chopping 1000 []
+Lucky: 100.0% | Skill: 154s
+Farming 783 []
+Gold: 50.0% | Skill: Ready`;
+    expect(parseChoppingFromText(crop)).toMatchObject({ state: "cooldown", cooldownSeconds: 154 });
   });
 });
