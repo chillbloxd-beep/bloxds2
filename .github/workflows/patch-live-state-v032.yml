@@ -17,6 +17,7 @@ jobs:
           fetch-depth: 0
       - name: Apply live-state patch
         run: |
+          python3 scripts/fix-v032-recursion.py
           python3 scripts/patch-live-state-v032.py
           python3 scripts/fix-v032-recursion.py
       - name: Commit patch if changed
