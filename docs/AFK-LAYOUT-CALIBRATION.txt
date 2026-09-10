@@ -1,0 +1,10 @@
+Observed reference layout (user-supplied screenshot): 1920x1200 Chrome window with OneBlock Analytics side panel open.
+Approximate Bloxd content viewport in the screenshot: 1303x1083 CSS-relative shape, aspect ~1.20.
+The One Block HUD remains anchored to the right edge. The adaptive crop uses normalized viewport coordinates, not absolute pixels or lobby IDs.
+
+AFK-sidepanel normalized regions used by v0.3.0:
+full:    x .735, y .31,  w .265, h .48
+counter: x .75,  y .45,  w .25,  h .12
+boost:   x .75,  y .59,  w .25,  h .105
+
+The full crop includes the One Block header through Gold/Daily when visible. The boost crop is deliberately small and the parser additionally requires a Chopping label before any Ready state can trigger automated input.
