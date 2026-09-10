@@ -4,14 +4,37 @@ import type { OcrMode, OcrRequest, OcrResponse } from "./types";
 
 let workerPromise: Promise<Worker> | null = null;
 
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+async function assertAsset(path: string): Promise<void> {
+  const url = chrome.runtime.getURL(path);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Bundled OCR asset is unavailable: ${path} (${response.status}).`);
+}
+
 async function getWorker(): Promise<Worker> {
   if (!workerPromise) {
-    workerPromise = createWorker("eng", OEM.LSTM_ONLY, {
-      workerPath: chrome.runtime.getURL("ocr/worker.min.js"),
-      corePath: chrome.runtime.getURL("ocr/core"),
-      langPath: chrome.runtime.getURL("ocr/lang"),
-      workerBlobURL: false,
-      gzip: true
+    workerPromise = (async () => {
+      await Promise.all([
+        assertAsset("ocr/worker.min.js"),
+        assertAsset("ocr/lang/eng.traineddata.gz")
+      ]);
+
+      return await createWorker("eng", OEM.LSTM_ONLY, {
+        workerPath: chrome.runtime.getURL("ocr/worker.min.js"),
+        corePath: chrome.runtime.getURL("ocr/core"),
+        langPath: chrome.runtime.getURL("ocr/lang"),
+        workerBlobURL: false,
+        gzip: true,
+        errorHandler: error => console.error("OneBlock OCR worker error:", error)
+      });
+    })().catch((error: unknown) => {
+      workerPromise = null;
+      throw new Error(`Tesseract initialization failed: ${errorText(error)}`);
     });
   }
   return workerPromise;
@@ -97,7 +120,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     .catch((error: unknown) => {
       const response: OcrResponse = {
         ok: false,
-        error: error instanceof Error ? error.message : "OCR failed."
+        error: errorText(error) || "OCR failed."
       };
       sendResponse(response);
     });
