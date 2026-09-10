@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'build/**'
+      - 'feature/**'
   pull_request:
     branches:
       - main
@@ -23,3 +24,13 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm test
       - run: npm run build
+      - run: npm run build:extension
+      - name: Validate extension bundle
+        run: |
+          test -f dist-extension/manifest.json
+          test -f dist-extension/background.js
+          test -f dist-extension/sidepanel.html
+          test -f dist-extension/offscreen.html
+          test -f dist-extension/ocr/worker.min.js
+          test -f dist-extension/ocr/lang/eng.traineddata.gz
+          find dist-extension/ocr/core -type f -name 'tesseract-core*' | grep -q .

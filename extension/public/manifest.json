@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "OneBlock Analytics",
+  "version": "0.2.0",
+  "description": "Local One Block OCR, run analytics and optional Chopping skill automation for Bloxd.io.",
+  "minimum_chrome_version": "118",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "offscreen",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://bloxd.io/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open OneBlock Analytics"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

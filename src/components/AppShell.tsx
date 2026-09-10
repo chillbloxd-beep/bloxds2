@@ -1,7 +1,7 @@
 import type { PropsWithChildren } from "react";
 import type { AppSettings } from "../types";
 
-export type ViewName = "overview" | "log" | "calculator" | "sessions" | "analytics" | "community" | "goals" | "settings";
+export type ViewName = "live" | "overview" | "log" | "calculator" | "sessions" | "analytics" | "community" | "goals" | "settings";
 
 const nav: { id: ViewName; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -13,6 +13,10 @@ const nav: { id: ViewName; label: string }[] = [
   { id: "goals", label: "Goals" }
 ];
 
+function extensionRuntime() {
+  return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+}
+
 export function AppShell({
   view, onNavigate, settings, onSettings, children
 }: PropsWithChildren<{
@@ -21,14 +25,15 @@ export function AppShell({
   settings: AppSettings;
   onSettings: (s: AppSettings) => void;
 }>) {
+  const items = extensionRuntime() ? [{ id: "live" as ViewName, label: "Live" }, ...nav] : nav;
   return <div className="app-shell">
     <aside className="sidebar">
-      <button className="brand" onClick={() => onNavigate("overview")}>
+      <button className="brand" onClick={() => onNavigate(extensionRuntime() ? "live" : "overview")}>
         <span className="brand-symbol"><i/></span>
         <span><b>ONEBLOCK</b><small>ANALYTICS</small></span>
       </button>
       <nav className="side-nav">
-        {nav.map(item => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}
+        {items.map(item => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => onNavigate(item.id)}>{item.label}</button>)}
       </nav>
       <div className="side-bottom">
         <button className={view === "settings" ? "active" : ""} onClick={() => onNavigate("settings")}>Settings</button>
@@ -38,11 +43,11 @@ export function AppShell({
       </div>
     </aside>
     <header className="mobile-head">
-      <button className="brand compact" onClick={() => onNavigate("overview")}><span className="brand-symbol"><i/></span><b>ONEBLOCK</b></button>
+      <button className="brand compact" onClick={() => onNavigate(extensionRuntime() ? "live" : "overview")}><span className="brand-symbol"><i/></span><b>ONEBLOCK</b></button>
       <select value={view} onChange={e => onNavigate(e.target.value as ViewName)}>
-        {[...nav, {id:"settings" as ViewName,label:"Settings"}].map(n=><option value={n.id} key={n.id}>{n.label}</option>)}
+        {[...items, {id:"settings" as ViewName,label:"Settings"}].map(n=><option value={n.id} key={n.id}>{n.label}</option>)}
       </select>
     </header>
     <main className="main">{children}</main>
-  </div>
+  </div>;
 }

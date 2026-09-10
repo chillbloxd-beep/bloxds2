@@ -1,0 +1,32 @@
+name: Build Chrome extension
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - run: npm run build:extension
+      - name: Package extension
+        run: |
+          cd dist-extension
+          zip -qr ../oneblock-analytics-extension.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oneblock-analytics-extension
+          path: oneblock-analytics-extension.zip
+          if-no-files-found: error
+          retention-days: 30
