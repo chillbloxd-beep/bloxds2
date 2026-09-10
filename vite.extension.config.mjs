@@ -14,10 +14,25 @@ function copyFile(source, destination) {
   fs.copyFileSync(source, destination);
 }
 
+function packageVersion(packageName) {
+  const packagePath = path.join(projectRoot, "node_modules", packageName, "package.json");
+  return JSON.parse(fs.readFileSync(packagePath, "utf8")).version;
+}
+
+function major(version) {
+  return Number(String(version).split(".")[0]);
+}
+
 function copyOcrAssets() {
   return {
     name: "copy-local-tesseract-assets",
     closeBundle() {
+      const tesseractVersion = packageVersion("tesseract.js");
+      const coreVersion = packageVersion("tesseract.js-core");
+      if (major(tesseractVersion) !== major(coreVersion)) {
+        throw new Error(`Tesseract runtime mismatch: tesseract.js ${tesseractVersion} with tesseract.js-core ${coreVersion}.`);
+      }
+
       const workerSource = path.join(projectRoot, "node_modules", "tesseract.js", "dist", "worker.min.js");
       if (!fs.existsSync(workerSource)) throw new Error(`Missing Tesseract worker: ${workerSource}`);
       copyFile(workerSource, path.join(outDir, "ocr", "worker.min.js"));
@@ -27,6 +42,18 @@ function copyOcrAssets() {
       const coreFiles = fs.readdirSync(coreSource).filter(name => /^tesseract-core.*\.(?:js|wasm)$/.test(name));
       if (!coreFiles.length) throw new Error("No Tesseract core assets were found.");
       for (const name of coreFiles) copyFile(path.join(coreSource, name), path.join(outDir, "ocr", "core", name));
+
+      const requiredCoreFiles = [
+        "tesseract-core.wasm.js",
+        "tesseract-core-simd.wasm.js",
+        "tesseract-core-lstm.wasm.js",
+        "tesseract-core-simd-lstm.wasm.js"
+      ];
+      for (const name of requiredCoreFiles) {
+        if (!fs.existsSync(path.join(outDir, "ocr", "core", name))) {
+          throw new Error(`Missing required Tesseract core build: ${name}`);
+        }
+      }
 
       const languageCandidates = [
         path.join(projectRoot, "node_modules", "@tesseract.js-data", "eng", "4.0.0_best_int", "eng.traineddata.gz"),
