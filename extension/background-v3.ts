@@ -464,7 +464,7 @@ function scheduleCooldown(seconds: number) {
   clearTimer(activeTimer);
   clearTimer(recheckTimer);
   void chrome.alarms.clear(BOOST_WAKE).then(() => {
-    chrome.alarms.create(BOOST_WAKE, { when: boostWakeAt });
+    chrome.alarms.create(BOOST_WAKE, { when: boostWakeAt! });
   });
 }
 
