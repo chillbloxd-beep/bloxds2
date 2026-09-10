@@ -20,6 +20,8 @@ A local-first performance analytics application for Bloxd.io One Block.
 - Cloudflare Worker + D1 community storage
 - Community combined throughput, mean, median, percentiles and full-run statistics
 - Dynamic robust outlier filtering for sufficiently large cohorts
+- Anonymous community-record withdrawal from the originating browser identity
+- Explicit disclosure when the live community cohort reaches its 10,000-run analysis cap
 - Unit tests for core mining math
 
 ## Deliberately excluded
@@ -98,8 +100,12 @@ npm run cf:dev
 - The Worker recalculates `blocks_mined` and `average_bps` server-side.
 - A random local install ID is salted + SHA-256 hashed by the Worker before D1 storage.
 - The hash is used to count anonymous contributors; the raw install ID is not stored in D1.
+- `ANON_HASH_SALT` must be configured as a strong Worker secret before community writes or withdrawals are accepted.
+- A synced community record can be withdrawn from Sessions; the Worker only deletes it when the run ID and salted anonymous browser identity both match.
+- If remote withdrawal fails, the local record is retained so the user can retry.
 - Short samples are retained but excluded from headline aggregates.
 - Statistical outlier filtering protects aggregate views; it is not presented as cheat detection.
+- Cross-origin API requests are denied unless they are same-origin or match the configured `ALLOWED_ORIGIN`.
 
 ## Statistical definitions
 
@@ -108,6 +114,10 @@ npm run cf:dev
 - Mean session rate = arithmetic mean of individual run rates
 - Median session rate = median of individual run rates
 - Percentile comparisons must be based on comparable cohorts, not silently mixed populations
+
+## Community aggregation limit
+
+The current live aggregate endpoint analyzes up to the latest 10,000 eligible runs for a selected cohort. If that cap is reached, the API returns `sampleCapped: true` and the UI discloses the limitation. Before cohorts routinely exceed this size, replace the live scan with precomputed aggregate tables so all-time statistics remain complete.
 
 ## Architecture
 
