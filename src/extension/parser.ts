@@ -33,13 +33,13 @@ function numberFromToken(token?: string): number | undefined {
 
 export function parseSkillState(text: string): SkillStateSnapshot {
   const compact = text.replace(/\s+/g, " ").trim();
-  if (/\bready\b/i.test(compact)) return { state: "ready", raw: compact };
   if (/\bactive\b/i.test(compact)) return { state: "active", raw: compact };
   const cooldown = compact.match(/([0-9IlOo|]{1,5})\s*s\b/i);
   if (cooldown) {
     const seconds = numberFromToken(cooldown[1]);
     if (seconds !== undefined && seconds <= 86400) return { state: "cooldown", cooldownSeconds: seconds, raw: compact };
   }
+  if (/\bready\b/i.test(compact)) return { state: "ready", raw: compact };
   return { state: "unknown", raw: compact };
 }
 
@@ -112,13 +112,28 @@ export function parseSidebarText(text: string, confidence?: number): SidebarSnap
   return snapshot;
 }
 
+function isChoppingLine(line: string): boolean {
+  // OCR occasionally substitutes zero for the first "o" or "l" for "i".
+  return /^Ch[o0]pp(?:ing|lng)\b/i.test(line);
+}
+
 export function parseChoppingFromText(text: string): SkillStateSnapshot {
   const lines = text.split(/\r?\n/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
-  const choppingIndex = lines.findIndex(line => /^Chopping\b/i.test(line));
-  if (choppingIndex >= 0) {
-    const neighborhood = lines.slice(choppingIndex, choppingIndex + 3).join(" ");
-    return parseSkillState(neighborhood);
+  const choppingIndex = lines.findIndex(isChoppingLine);
+  if (choppingIndex < 0) {
+    // Fail closed: the crop can contain Digging/Gold "Ready" lines. Never treat
+    // a generic Ready elsewhere in the panel as the Chopping state.
+    return { state: "unknown", raw: text.replace(/\s+/g, " ").trim() };
   }
-  const skillLine = lines.find(line => /Skill/i.test(line));
-  return parseSkillState(skillLine || text);
+
+  const scoped: string[] = [];
+  for (let i = choppingIndex; i < Math.min(lines.length, choppingIndex + 3); i += 1) {
+    const line = lines[i];
+    if (i > choppingIndex && /^(Mining|Digging|Farming|Gold)\b/i.test(line)) break;
+    scoped.push(line);
+  }
+
+  const skillLine = scoped.find(line => /Skill/i.test(line));
+  if (skillLine) return parseSkillState(skillLine);
+  return parseSkillState(scoped.join(" "));
 }
