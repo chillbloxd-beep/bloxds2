@@ -1,0 +1,31 @@
+name: Apply v0.3.3 low-overhead patch
+
+on:
+  push:
+    branches: [feature/low-overhead-v033]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/low-overhead-v033
+          fetch-depth: 0
+      - name: Apply low-overhead patch
+        run: python3 scripts/patch-low-overhead-v033.py
+      - name: Commit changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Patch already applied."
+            exit 0
+          fi
+          git config user.name "OneBlock Analytics CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add extension/background-v3.ts src/views/LiveExtension.tsx package.json extension/public/manifest.json README.md
+          git commit -m "Reduce OCR overhead during mining"
+          git push origin HEAD:feature/low-overhead-v033
