@@ -11,11 +11,16 @@ import { Analytics } from "./views/Analytics";
 import { Community } from "./views/Community";
 import { Goals } from "./views/Goals";
 import { Settings } from "./views/Settings";
+import { LiveExtension } from "./views/LiveExtension";
 
 const DEFAULT_SETTINGS: AppSettings = { theme: "light", defaultCommunityOptIn: false };
 
+function isExtensionRuntime() {
+  return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+}
+
 export default function App() {
-  const [view, setView] = useState<ViewName>("overview");
+  const [view, setView] = useState<ViewName>(() => isExtensionRuntime() ? "live" : "overview");
   const [sessions, setSessions] = useState<MiningSession[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -81,6 +86,7 @@ export default function App() {
   const content = useMemo(() => {
     const shared = { sessions, settings };
     switch (view) {
+      case "live": return isExtensionRuntime() ? <LiveExtension appSettings={settings} onSave={saveSession} /> : <Overview sessions={sessions} goals={goals} onNavigate={setView} />;
       case "log": return <LogRun {...shared} onSave={saveSession} />;
       case "calculator": return <Calculator {...shared} />;
       case "sessions": return <Sessions sessions={sessions} onDelete={deleteSession} />;

@@ -1,7 +1,46 @@
 export type Game = "bloxd" | "minecraft";
 export type MiningType = "active" | "afk";
-export type SessionSource = "manual" | "live_timer" | "afk_timer";
+export type SessionSource = "manual" | "live_timer" | "afk_timer" | "extension";
 export type QualityState = "local" | "included" | "short_sample" | "review";
+
+export type SkillStateKind = "ready" | "active" | "cooldown" | "unknown";
+
+export interface SkillStateSnapshot {
+  state: SkillStateKind;
+  cooldownSeconds?: number;
+  raw?: string;
+}
+
+export interface SidebarSkillSnapshot {
+  level?: number;
+  luckyPercent?: number;
+  skill?: SkillStateSnapshot;
+}
+
+export interface SidebarSnapshot {
+  capturedAt: string;
+  rawText: string;
+  lines: string[];
+  ocrConfidence?: number;
+  banner?: string;
+  owner?: string;
+  phase?: string;
+  blocksMined?: number;
+  mining?: SidebarSkillSnapshot;
+  digging?: SidebarSkillSnapshot;
+  chopping?: SidebarSkillSnapshot;
+  farmingLevel?: number;
+  goldPercent?: number;
+  goldSkill?: SkillStateSnapshot;
+  daily?: string;
+}
+
+export interface BoostRunStats {
+  successfulActivations: number;
+  activationRetries: number;
+  failedActivations: number;
+  cooldownsRead: number[];
+}
 
 export interface MiningSession {
   id: string;
@@ -23,6 +62,11 @@ export interface MiningSession {
   momentum?: string;
   device?: string;
   notes?: string;
+  sidebarBefore?: SidebarSnapshot;
+  sidebarAfter?: SidebarSnapshot;
+  boostStats?: BoostRunStats;
+  extensionConnectionMode?: "manual" | "auto";
+  lobby?: string;
   communityOptIn: boolean;
   cloudStatus?: "local" | "synced" | "failed";
 }
