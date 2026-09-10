@@ -1,0 +1,31 @@
+name: Apply v0.3.4 precision + dumb patch
+
+on:
+  push:
+    branches: [feature/precision-dumb-v034]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/precision-dumb-v034
+          fetch-depth: 0
+      - name: Apply v0.3.4 patch
+        run: python3 scripts/patch-precision-dumb-v034.py
+      - name: Commit generated changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Patch already applied."
+            exit 0
+          fi
+          git config user.name "OneBlock Analytics CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add extension/background-v3.ts src/extension/types.ts src/views/LiveExtension.tsx package.json extension/public/manifest.json README.md
+          git commit -m "Add precision Chopping timing and Dumb mode"
+          git push origin HEAD:feature/precision-dumb-v034
