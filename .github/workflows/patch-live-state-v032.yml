@@ -15,11 +15,8 @@ jobs:
         with:
           ref: fix/live-state-v032
           fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Apply live-state patch
-        run: node scripts/patch-live-state-v032.mjs
+        run: python3 scripts/patch-live-state-v032.py
       - name: Commit patch if changed
         shell: bash
         run: |
