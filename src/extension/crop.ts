@@ -22,12 +22,12 @@ type CropSet = Record<OcrMode, NormalizedCrop>;
 // so lobby number and absolute screen resolution do not matter.
 const CROPS: Record<OcrCropProfile, CropSet> = {
   "afk-sidepanel": {
-    full: { x: 0.74, y: 0.32, w: 0.26, h: 0.42 },
+    full: { x: 0.735, y: 0.31, w: 0.265, h: 0.48 },
     counter: { x: 0.75, y: 0.45, w: 0.25, h: 0.12 },
     boost: { x: 0.75, y: 0.59, w: 0.25, h: 0.105 }
   },
   standard: {
-    full: { x: 0.71, y: 0.27, w: 0.29, h: 0.52 },
+    full: { x: 0.71, y: 0.25, w: 0.29, h: 0.58 },
     counter: { x: 0.73, y: 0.40, w: 0.27, h: 0.17 },
     boost: { x: 0.73, y: 0.54, w: 0.27, h: 0.18 }
   },
