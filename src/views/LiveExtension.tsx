@@ -184,7 +184,7 @@ export function LiveExtension({
         <label className="field"><span>Active check (s)</span><input type="number" min="0.75" max="5" step="0.25" value={settings.activeCheckSec} onChange={event => void patch({ activeCheckSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Cooldown safety (s)</span><input type="number" min="0" max="10" step="0.5" value={settings.cooldownSafetySec} onChange={event => void patch({ cooldownSafetySec: Number(event.target.value) })} /></label>
         <label className="field"><span>Not-ready recheck (s)</span><input type="number" min="1" max="10" step="0.5" value={settings.readyRetrySec} onChange={event => void patch({ readyRetrySec: Number(event.target.value) })} /></label>
-        <label className="field"><span>E double-tap gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
+        <label className="field"><span>E burst gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
       </div>
       <p className="microcopy">The boost watcher does not OCR each countdown second. After reading a cooldown such as 157s, it schedules its next boost check for 157s + the safety delay.</p>
     </Section>

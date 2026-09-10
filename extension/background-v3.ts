@@ -510,7 +510,7 @@ async function verifyBoostCycle() {
         return;
       }
       boostTotals.failedActivations += 1;
-      boostFault = "Input was not confirmed after the one allowed E ×2 retry.";
+      boostFault = "Input was not confirmed after the one allowed backup E ×3 burst.";
       boostCycle = undefined;
       log(boostFault, "error");
       return;
@@ -614,7 +614,7 @@ async function refreshLiveStateOnPoll() {
       }
     }
 
-    if (Date.now() - lastFullReadAt >= 15_000 && !boostCycle) {
+    if (Date.now() - lastFullReadAt >= 15_000 && !boostCycle && !boostSleeping) {
       void readFullSnapshot(false)
         .then(snapshot => log(`Full sidebar live refresh complete${snapshot.blocksMined !== undefined ? ` · ${snapshot.blocksMined.toLocaleString()} blocks` : ""}.`))
         .catch(error => log(`Full sidebar live refresh: ${errorText(error)}`, "warn"));
@@ -808,7 +808,8 @@ async function startSession(miningType: "active" | "afk") {
     }
   };
   await saveActiveSession();
-  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks. Full sidebar snapshot saved.`);
+  lastCounterReadAt = 0; // Force a fresh small counter read on the next 1s UI poll.
+  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks. Full sidebar snapshot saved; live counter refresh armed.`);
 }
 
 async function stopSession(): Promise<MiningSession> {
