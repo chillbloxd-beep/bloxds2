@@ -65,4 +65,6 @@ export interface CommunitySummary {
   averageDurationMs: number | null;
   medianDurationMs: number | null;
   excludedOutliers: number;
+  sampleCapped: boolean;
+  sampleLimit: number;
 }
