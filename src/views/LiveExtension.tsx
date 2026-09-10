@@ -139,7 +139,7 @@ export function LiveExtension({
         <div className="run-capture-state">
           <span>{status.sessionActive ? "RUNNING" : "READY"}</span>
           <strong>{status.sessionActive ? elapsed(status.sessionStartedAt) : "No active session"}</strong>
-          {status.sessionActive && <small>{counterDelta === undefined ? "Waiting for counter sample" : `${formatInteger(counterDelta)} blocks since start`}</small>}
+          {status.sessionActive && <small>{counterDelta === undefined ? "Waiting for counter sample" : counterDelta === 0 ? `Live counter sampling every ${settings.counterIntervalSec}s` : `${formatInteger(counterDelta)} blocks since start`}</small>}
         </div>
         {!status.sessionActive ? <>
           <label className="field"><span>Run type</span><select value={miningType} onChange={event => setMiningType(event.target.value as MiningType)}><option value="active">Active</option><option value="afk">AFK</option></select></label>

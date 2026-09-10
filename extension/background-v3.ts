@@ -283,7 +283,7 @@ async function readCounter(): Promise<number | undefined> {
   // Two consecutive misses indicate that the viewport may have changed (for
   // example the Chrome side panel was opened/closed). Try small alternate
   // crops before paying for a full-panel recalibration.
-  for (const profile of profiles.slice(1)) {
+  for (const profile of profiles.slice(1, 3)) {
     response = await captureOcr("counter", profile);
     if (response.blocksMined !== undefined) {
       activeOcrProfile = profile;
@@ -295,8 +295,8 @@ async function readCounter(): Promise<number | undefined> {
   }
 
   counterMisses = 0;
-  const snapshot = await readFullSnapshot(true);
-  return snapshot.blocksMined;
+  log("Counter OCR missed all small crops; skipping automatic full-panel recalibration to protect game performance. Use Recalibrate OCR if this continues.", "warn");
+  return undefined;
 }
 
 async function readBoost(): Promise<SkillStateSnapshot> {
@@ -314,7 +314,7 @@ async function readBoost(): Promise<SkillStateSnapshot> {
   // Bootstrap reliability: one unknown Chopping read immediately tries the
   // alternate calibrated crops instead of leaving Auto Boost idle.
   if (boostMisses >= 1) {
-    for (const profile of profiles.slice(1)) {
+    for (const profile of profiles.slice(1, 3)) {
       response = await captureOcr("boost", profile);
       skill = response.choppingSkill || { state: "unknown" as const };
       if (skill.state !== "unknown") {
@@ -326,11 +326,12 @@ async function readBoost(): Promise<SkillStateSnapshot> {
       }
     }
 
-    // A full read is the final recovery path. parseChoppingFromText fails
-    // closed, so neighboring Digging/Gold Ready states cannot trigger E.
-    const snapshot = await readFullSnapshot(true);
-    skill = snapshot.chopping?.skill || { state: "unknown" as const };
+    // Low-overhead mode deliberately does not escalate an unclear boost crop
+    // into full-sidebar OCR while mining. Keep the action fail-closed and retry
+    // later; explicit Recalibrate OCR remains available if the layout changed.
+    skill = { state: "unknown" as const };
     boostMisses = 0;
+    log("Chopping OCR unclear across the small boost crops; no E sent and no full-panel OCR forced.", "warn");
   }
 
   setChoppingSkill(skill);
@@ -582,19 +583,11 @@ async function refreshLiveStateOnPoll() {
   if (liveRefreshFlight) return liveRefreshFlight;
   const flight = (async () => {
     const now = Date.now();
+    const boostSleeping = boostWakeAt !== undefined && now < boostWakeAt;
+    let boostReadRan = false;
 
-    if (settings.liveCounter && now - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
-      try {
-        const value = await readCounter();
-        if (value === undefined) log("Live counter refresh did not get a number; it will retry automatically.", "warn");
-      } catch (error) {
-        log(`Live counter refresh: ${errorText(error)}`, "warn");
-      }
-    }
-
-    const afterCounter = Date.now();
-    const boostSleeping = boostWakeAt !== undefined && afterCounter < boostWakeAt;
-    if (settings.autoBoost && !boostFault && !boostCycle && !boostSleeping && afterCounter - lastBoostReadAt >= 2000) {
+    if (settings.autoBoost && !boostFault && !boostCycle && !boostSleeping && now - lastBoostReadAt >= 2000) {
+      boostReadRan = true;
       try {
         const observed = await readBoost();
         if (observed.state === "ready") await beginBoostCycle();
@@ -606,9 +599,18 @@ async function refreshLiveStateOnPoll() {
       }
     }
 
-    // Do not run periodic full-panel OCR while mining. Full sidebar snapshots are
-    // intentionally limited to connect, run start/end, and explicit Refresh/Recalibrate.
-    // Blocks mined and Chopping are kept current by their much smaller crops.
+    const afterBoost = Date.now();
+    if (!boostReadRan && settings.liveCounter && afterBoost - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
+      try {
+        const value = await readCounter();
+        if (value === undefined) log("Live counter refresh did not get a number; it will retry automatically.", "warn");
+      } catch (error) {
+        log(`Live counter refresh: ${errorText(error)}`, "warn");
+      }
+    }
+
+    // No automatic full-panel OCR while mining. Full sidebar snapshots are
+    // limited to connect, run start/end, and explicit Refresh/Recalibrate.
   })();
   liveRefreshFlight = flight;
   try {
