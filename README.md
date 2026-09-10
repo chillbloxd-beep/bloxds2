@@ -192,6 +192,11 @@ CI validates source compilation, parser tests, both production builds and the pa
 Auto Boost now keeps rechecking when the first Chopping OCR state is unknown instead of remaining idle. The first unknown boost crop immediately tries alternate calibrated crops. E dispatch brings the connected Bloxd target to the front and uses raw key-down input, which is better suited to game keyboard handlers. A **Test E ×2** diagnostic (available while Auto Boost is off) separates OCR/state-detection failures from keyboard-input failures.
 
 
-### v0.3.2 live refresh
+### v0.3.3 live refresh
 
 The extension side panel polls live state once per second. Counter OCR is due every 5 seconds by default, Chopping is re-read during actionable states, the visible cooldown decrements locally without OCRing every second, and the parsed full sidebar refreshes periodically while the panel is open. A floating Action Log mirrors the newest diagnostics, including each attempted E press.
+
+
+### v0.3.3 low-overhead mining mode
+
+The side panel no longer runs a duplicate background counter OCR loop or periodic full-sidebar OCR while mining. Full sidebar snapshots are limited to connect, run start/end, and explicit refresh/recalibration. Live Blocks mined uses a tiny crop every 20 seconds by default (configurable 10–180 seconds), while Chopping OCR runs only around actionable state transitions and sleeps through known cooldowns. UI status polling reads cached state between OCR events.

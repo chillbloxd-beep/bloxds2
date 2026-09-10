@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   manualEnabled: false,
   autoBoost: false,
   liveCounter: true,
-  counterIntervalSec: 5,
+  counterIntervalSec: 20,
   verifyAfterPressSec: 3,
   activeCheckSec: 1.5,
   cooldownSafetySec: 2,
@@ -92,7 +92,7 @@ async function ensureLoaded() {
 function sanitizeSettings(next: ExtensionSettings): ExtensionSettings {
   return {
     ...next,
-    counterIntervalSec: Math.min(60, Math.max(5, Number(next.counterIntervalSec) || 5)),
+    counterIntervalSec: Math.min(180, Math.max(10, Number(next.counterIntervalSec) || 20)),
     verifyAfterPressSec: Math.min(10, Math.max(1, Number(next.verifyAfterPressSec) || 3)),
     activeCheckSec: Math.min(5, Math.max(0.75, Number(next.activeCheckSec) || 1.5)),
     cooldownSafetySec: Math.min(10, Math.max(0, Number(next.cooldownSafetySec) || 2)),
@@ -384,20 +384,12 @@ function scheduleRecheck(seconds = settings.readyRetrySec) {
 }
 
 function scheduleCounter() {
+  // v0.3.3 low-overhead mode: do not run a second background OCR loop.
+  // The open side panel already polls cached status and only triggers a tiny
+  // counter crop when the configured interval is actually due. When the side
+  // panel is closed, no live counter OCR runs; start/end snapshots remain exact.
   clearTimer(counterTimer);
   counterTimer = undefined;
-  if (connectedTabId === undefined || !settings.liveCounter) return;
-  counterTimer = self.setTimeout(() => {
-    void (async () => {
-      try {
-        await readCounter();
-      } catch (error) {
-        log(`Counter OCR: ${errorText(error)}`, "warn");
-      } finally {
-        scheduleCounter();
-      }
-    })();
-  }, settings.counterIntervalSec * 1000);
 }
 
 async function keyE() {
@@ -614,11 +606,9 @@ async function refreshLiveStateOnPoll() {
       }
     }
 
-    if (Date.now() - lastFullReadAt >= 15_000 && !boostCycle && !boostSleeping) {
-      void readFullSnapshot(false)
-        .then(snapshot => log(`Full sidebar live refresh complete${snapshot.blocksMined !== undefined ? ` · ${snapshot.blocksMined.toLocaleString()} blocks` : ""}.`))
-        .catch(error => log(`Full sidebar live refresh: ${errorText(error)}`, "warn"));
-    }
+    // Do not run periodic full-panel OCR while mining. Full sidebar snapshots are
+    // intentionally limited to connect, run start/end, and explicit Refresh/Recalibrate.
+    // Blocks mined and Chopping are kept current by their much smaller crops.
   })();
   liveRefreshFlight = flight;
   try {
