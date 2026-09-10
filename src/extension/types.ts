@@ -1,6 +1,7 @@
 import type { MiningSession, MiningType, SidebarSnapshot, SkillStateSnapshot } from "../types";
 
 export type ExtensionConnectionMode = "manual" | "auto";
+export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
 
 export interface ExtensionSettings {
   mode: ExtensionConnectionMode;
@@ -34,6 +35,9 @@ export interface LiveExtensionStatus {
   lastOcrConfidence?: number;
   lastOcrMs?: number;
   readsLastMinute: number;
+  ocrProfile?: OcrCropProfile;
+  viewportWidth?: number;
+  viewportHeight?: number;
   sessionActive: boolean;
   sessionStartedAt?: string;
   sessionStartBlocks?: number;
@@ -63,6 +67,7 @@ export type BackgroundCommand =
   | { target: "background"; type: "GET_STATUS" }
   | { target: "background"; type: "SET_SETTINGS"; patch: Partial<ExtensionSettings> }
   | { target: "background"; type: "REFRESH_FULL" }
+  | { target: "background"; type: "RECALIBRATE_OCR" }
   | { target: "background"; type: "SCAN_NOW" }
   | { target: "background"; type: "START_SESSION"; miningType: MiningType }
   | { target: "background"; type: "STOP_SESSION" }
