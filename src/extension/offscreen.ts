@@ -16,12 +16,25 @@ async function assertAsset(path: string): Promise<void> {
   if (!response.ok) throw new Error(`Bundled OCR asset is unavailable: ${path} (${response.status}).`);
 }
 
+async function resetWorker() {
+  const existing = workerPromise;
+  workerPromise = null;
+  if (!existing) return;
+  try {
+    const worker = await existing;
+    await worker.terminate();
+  } catch {
+    // A failed worker is already unusable. Clearing workerPromise is enough.
+  }
+}
+
 async function getWorker(): Promise<Worker> {
   if (!workerPromise) {
     workerPromise = (async () => {
       await Promise.all([
         assertAsset("ocr/worker.min.js"),
-        assertAsset("ocr/lang/eng.traineddata.gz")
+        assertAsset("ocr/lang/eng.traineddata.gz"),
+        assertAsset("ocr/core/tesseract-core.wasm.js")
       ]);
 
       return await createWorker("eng", OEM.LSTM_ONLY, {
@@ -51,7 +64,9 @@ async function imageElement(dataUrl: string): Promise<HTMLImageElement> {
 
 async function preprocess(dataUrl: string, mode: OcrMode): Promise<HTMLCanvasElement> {
   const image = await imageElement(dataUrl);
-  const multiplier = mode === "full" ? 1.65 : 2.15;
+  // The live counter/boost crops contain smaller text, so they get more
+  // enlargement than the complete sidebar snapshot.
+  const multiplier = mode === "full" ? 1.85 : 2.55;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(image.naturalWidth * multiplier));
   canvas.height = Math.max(1, Math.round(image.naturalHeight * multiplier));
@@ -60,8 +75,8 @@ async function preprocess(dataUrl: string, mode: OcrMode): Promise<HTMLCanvasEle
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
   context.filter = mode === "full"
-    ? "grayscale(1) contrast(1.45) brightness(1.12)"
-    : "grayscale(1) contrast(1.75) brightness(1.16)";
+    ? "grayscale(1) contrast(1.55) brightness(1.10)"
+    : "grayscale(1) contrast(1.90) brightness(1.12)";
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
   context.filter = "none";
   return canvas;
@@ -69,46 +84,51 @@ async function preprocess(dataUrl: string, mode: OcrMode): Promise<HTMLCanvasEle
 
 async function recognize(request: OcrRequest): Promise<OcrResponse> {
   const started = performance.now();
-  const worker = await getWorker();
   const canvas = await preprocess(request.imageDataUrl, request.mode);
 
-  await worker.setParameters({
-    tessedit_pageseg_mode: request.mode === "full" ? PSM.SPARSE_TEXT : PSM.SINGLE_BLOCK,
-    preserve_interword_spaces: "1"
-  });
+  try {
+    const worker = await getWorker();
+    await worker.setParameters({
+      tessedit_pageseg_mode: request.mode === "full" ? PSM.SPARSE_TEXT : PSM.SINGLE_BLOCK,
+      preserve_interword_spaces: "1"
+    });
 
-  const result = await worker.recognize(canvas);
-  const rawText = result.data.text || "";
-  const confidence = Number.isFinite(result.data.confidence) ? result.data.confidence : undefined;
-  const elapsedMs = Math.round(performance.now() - started);
+    const result = await worker.recognize(canvas);
+    const rawText = result.data.text || "";
+    const confidence = Number.isFinite(result.data.confidence) ? result.data.confidence : undefined;
+    const elapsedMs = Math.round(performance.now() - started);
 
-  if (request.mode === "full") {
+    if (request.mode === "full") {
+      return {
+        ok: true,
+        rawText,
+        confidence,
+        elapsedMs,
+        snapshot: parseSidebarText(rawText, confidence)
+      };
+    }
+
+    if (request.mode === "counter") {
+      return {
+        ok: true,
+        rawText,
+        confidence,
+        elapsedMs,
+        blocksMined: parseBlocksMined(rawText)
+      };
+    }
+
     return {
       ok: true,
       rawText,
       confidence,
       elapsedMs,
-      snapshot: parseSidebarText(rawText, confidence)
+      choppingSkill: parseChoppingFromText(rawText)
     };
+  } catch (error) {
+    await resetWorker();
+    throw new Error(`Tesseract recognition failed: ${errorText(error)}`);
   }
-
-  if (request.mode === "counter") {
-    return {
-      ok: true,
-      rawText,
-      confidence,
-      elapsedMs,
-      blocksMined: parseBlocksMined(rawText)
-    };
-  }
-
-  return {
-    ok: true,
-    rawText,
-    confidence,
-    elapsedMs,
-    choppingSkill: parseChoppingFromText(rawText)
-  };
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
