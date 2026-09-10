@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OneBlock Analytics",
-  "version": "0.2.1",
-  "description": "Local One Block OCR, run analytics and optional Chopping skill automation for Bloxd.io.",
+  "version": "0.3.0",
+  "description": "Adaptive local One Block OCR, run analytics and optional guarded Chopping skill automation for Bloxd.io.",
   "minimum_chrome_version": "150",
   "permissions": [
     "alarms",

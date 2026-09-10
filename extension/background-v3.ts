@@ -1,4 +1,5 @@
 import type { MiningSession, SidebarSnapshot, SkillStateSnapshot } from "../src/types";
+import { cropRegion, isUsableSnapshot, profileOrder, snapshotScore, type OcrViewport } from "../src/extension/crop";
 import { isOneBlockUrl, lobbyFromUrl } from "../src/extension/parser";
 import type {
   ActiveExtensionSession,
@@ -7,6 +8,7 @@ import type {
   DiagnosticEntry,
   ExtensionSettings,
   LiveExtensionStatus,
+  OcrCropProfile,
   OcrMode,
   OcrRequest,
   OcrResponse
@@ -54,9 +56,23 @@ let verifyTimer: number | undefined;
 let activeTimer: number | undefined;
 let recheckTimer: number | undefined;
 let counterTimer: number | undefined;
+let connectFlight: Promise<void> | null = null;
+let connectingTabId: number | undefined;
+let fullReadFlight: Promise<SidebarSnapshot> | null = null;
+let ocrQueue: Promise<void> = Promise.resolve();
+let activeOcrProfile: OcrCropProfile | undefined;
+let lastViewport: OcrViewport | undefined;
+let counterMisses = 0;
+let boostMisses = 0;
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
 
 function log(message: string, level: DiagnosticEntry["level"] = "info") {
-  diagnostics = [{ at: new Date().toISOString(), level, message }, ...diagnostics].slice(0, 80);
+  diagnostics = [{ at: new Date().toISOString(), level, message }, ...diagnostics].slice(0, 100);
 }
 
 async function ensureLoaded() {
@@ -96,21 +112,31 @@ function recordOcr(response: OcrResponse) {
   lastOcrMs = response.elapsedMs;
 }
 
+function enqueueOcr<T>(task: () => Promise<T>): Promise<T> {
+  const next = ocrQueue.then(task, task);
+  ocrQueue = next.then(() => undefined, () => undefined);
+  return next;
+}
+
 async function ensureOffscreen() {
   if (await chrome.offscreen.hasDocument()) return;
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
     reasons: [chrome.offscreen.Reason.DOM_SCRAPING],
-    justification: "Process small captured One Block sidebar regions locally for OCR."
+    justification: "Process only small captured One Block sidebar regions locally for OCR."
   });
+}
+
+async function directDebuggerCommand<T = unknown>(tabId: number, method: string, params?: { [key: string]: unknown }): Promise<T> {
+  return await chrome.debugger.sendCommand({ tabId }, method, params) as T;
 }
 
 async function debuggerCommand<T = unknown>(method: string, params?: { [key: string]: unknown }): Promise<T> {
   if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
-  return await chrome.debugger.sendCommand({ tabId: connectedTabId }, method, params) as T;
+  return await directDebuggerCommand<T>(connectedTabId, method, params);
 }
 
-async function viewport() {
+async function viewport(): Promise<OcrViewport> {
   const metrics = await debuggerCommand<any>("Page.getLayoutMetrics");
   const visual = metrics.cssVisualViewport || metrics.visualViewport || metrics.cssContentSize || metrics.contentSize;
   const width = Number(visual?.clientWidth ?? visual?.width);
@@ -118,79 +144,166 @@ async function viewport() {
   const pageX = Number(visual?.pageX || 0);
   const pageY = Number(visual?.pageY || 0);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    throw new Error("Could not determine Bloxd viewport size.");
+    throw new Error("Could not determine the Bloxd game viewport size.");
   }
-  return { width, height, pageX, pageY };
+  lastViewport = { width, height, pageX, pageY };
+  return lastViewport;
 }
 
-function region(mode: OcrMode, width: number, height: number, pageX: number, pageY: number, wide = false) {
-  const normalized = wide
-    ? { x: 0.60, y: 0.16, w: 0.40, h: 0.66 }
-    : mode === "full"
-      ? { x: 0.70, y: 0.27, w: 0.30, h: 0.54 }
-      : mode === "counter"
-        ? { x: 0.72, y: 0.40, w: 0.28, h: 0.15 }
-        : { x: 0.72, y: 0.55, w: 0.28, h: 0.14 };
-  return {
-    x: pageX + width * normalized.x,
-    y: pageY + height * normalized.y,
-    width: width * normalized.w,
-    height: height * normalized.h,
-    scale: 1
-  };
+function orderedProfiles(view: OcrViewport): OcrCropProfile[] {
+  const ordered = profileOrder(view.width, view.height);
+  if (!activeOcrProfile) return ordered;
+  return [activeOcrProfile, ...ordered.filter(profile => profile !== activeOcrProfile)];
 }
 
-async function ocr(mode: OcrMode, wide = false): Promise<OcrResponse> {
-  await ensureOffscreen();
-  const view = await viewport();
-  const capture = await debuggerCommand<{ data: string }>("Page.captureScreenshot", {
-    format: "png",
-    fromSurface: true,
-    captureBeyondViewport: false,
-    clip: region(mode, view.width, view.height, view.pageX, view.pageY, wide)
+async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrResponse> {
+  return enqueueOcr(async () => {
+    await ensureOffscreen();
+    const view = await viewport();
+    const clip = cropRegion(profile, mode, view);
+    const capture = await debuggerCommand<{ data: string }>("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: false,
+      clip
+    });
+    if (!capture?.data) throw new Error(`Screenshot capture returned no data (${mode}/${profile}).`);
+
+    const request: OcrRequest = {
+      target: "offscreen",
+      type: "OCR",
+      mode,
+      imageDataUrl: `data:image/png;base64,${capture.data}`
+    };
+    const response = await chrome.runtime.sendMessage(request) as OcrResponse;
+    if (!response) throw new Error(`OCR worker returned no response (${mode}/${profile}).`);
+    if (!response.ok) throw new Error(`${response.error || "OCR failed"} [${mode}/${profile}]`);
+    recordOcr(response);
+    return response;
   });
-  const request: OcrRequest = {
-    target: "offscreen",
-    type: "OCR",
-    mode,
-    imageDataUrl: `data:image/png;base64,${capture.data}`
-  };
-  const response = await chrome.runtime.sendMessage(request) as OcrResponse;
-  if (!response?.ok) throw new Error(response?.error || "OCR failed.");
-  recordOcr(response);
-  return response;
 }
 
-async function readFullSnapshot(): Promise<SidebarSnapshot> {
-  let response = await ocr("full");
-  let snapshot = response.snapshot;
-  if (snapshot?.blocksMined === undefined) {
-    response = await ocr("full", true);
-    snapshot = response.snapshot;
-  }
-  if (!snapshot) throw new Error("Could not read the One Block sidebar.");
+function applySnapshot(snapshot: SidebarSnapshot) {
   currentSnapshot = snapshot;
   if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined);
   if (snapshot.chopping?.skill) choppingSkill = snapshot.chopping.skill;
-  return snapshot;
+}
+
+async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapshot> {
+  const view = await viewport();
+  const candidates = forceRecalibrate
+    ? profileOrder(view.width, view.height)
+    : orderedProfiles(view);
+
+  let best: { profile: OcrCropProfile; snapshot: SidebarSnapshot; score: number } | undefined;
+  const attempted: string[] = [];
+
+  for (const profile of candidates) {
+    try {
+      const response = await captureOcr("full", profile);
+      const snapshot = response.snapshot;
+      const score = snapshotScore(snapshot);
+      attempted.push(`${profile}:${score}`);
+      if (snapshot && (!best || score > best.score)) best = { profile, snapshot, score };
+      if (isUsableSnapshot(snapshot)) {
+        const changed = activeOcrProfile !== profile;
+        activeOcrProfile = profile;
+        applySnapshot(snapshot!);
+        counterMisses = 0;
+        if (changed) {
+          log(`OCR calibrated to ${profile} for ${Math.round(view.width)}×${Math.round(view.height)} viewport.`);
+        }
+        return snapshot!;
+      }
+    } catch (error) {
+      attempted.push(`${profile}:error`);
+      log(`OCR ${profile} calibration attempt failed: ${errorText(error)}`, "warn");
+    }
+  }
+
+  if (best) {
+    activeOcrProfile = best.profile;
+    applySnapshot(best.snapshot);
+    log(`OCR produced a partial sidebar read (${attempted.join(", ")}). Blocks mined was not reliably located.`, "warn");
+    return best.snapshot;
+  }
+
+  throw new Error(`Could not OCR the One Block sidebar. Profiles tried: ${attempted.join(", ") || "none"}.`);
+}
+
+async function readFullSnapshot(forceRecalibrate = false): Promise<SidebarSnapshot> {
+  if (fullReadFlight) return fullReadFlight;
+  fullReadFlight = performFullRead(forceRecalibrate).finally(() => {
+    fullReadFlight = null;
+  });
+  return fullReadFlight;
 }
 
 async function readCounter(): Promise<number | undefined> {
-  const response = await ocr("counter");
+  const view = await viewport();
+  const profiles = orderedProfiles(view);
+  const primary = profiles[0];
+  let response = await captureOcr("counter", primary);
   if (response.blocksMined !== undefined) {
+    counterMisses = 0;
     updateCounter(response.blocksMined);
     return response.blocksMined;
   }
-  return undefined;
+
+  counterMisses += 1;
+  if (counterMisses < 2) return undefined;
+
+  // Two consecutive misses indicate that the viewport may have changed (for
+  // example the Chrome side panel was opened/closed). Try small alternate
+  // crops before paying for a full-panel recalibration.
+  for (const profile of profiles.slice(1)) {
+    response = await captureOcr("counter", profile);
+    if (response.blocksMined !== undefined) {
+      activeOcrProfile = profile;
+      counterMisses = 0;
+      updateCounter(response.blocksMined);
+      log(`Counter crop automatically recalibrated to ${profile}.`);
+      return response.blocksMined;
+    }
+  }
+
+  counterMisses = 0;
+  const snapshot = await readFullSnapshot(true);
+  return snapshot.blocksMined;
 }
 
 async function readBoost(): Promise<SkillStateSnapshot> {
-  let response = await ocr("boost");
+  const view = await viewport();
+  const profiles = orderedProfiles(view);
+  let response = await captureOcr("boost", profiles[0]);
   let skill = response.choppingSkill || { state: "unknown" as const };
-  if (skill.state === "unknown") {
-    response = await ocr("full");
-    skill = response.snapshot?.chopping?.skill || skill;
+  if (skill.state !== "unknown") {
+    boostMisses = 0;
+    choppingSkill = skill;
+    return skill;
   }
+
+  boostMisses += 1;
+  if (boostMisses >= 2) {
+    for (const profile of profiles.slice(1)) {
+      response = await captureOcr("boost", profile);
+      skill = response.choppingSkill || { state: "unknown" as const };
+      if (skill.state !== "unknown") {
+        activeOcrProfile = profile;
+        boostMisses = 0;
+        choppingSkill = skill;
+        log(`Boost crop automatically recalibrated to ${profile}.`);
+        return skill;
+      }
+    }
+
+    // A full read is the final recovery path. parseChoppingFromText fails
+    // closed, so neighboring Digging/Gold Ready states cannot trigger E.
+    const snapshot = await readFullSnapshot(true);
+    skill = snapshot.chopping?.skill || { state: "unknown" as const };
+    boostMisses = 0;
+  }
+
   choppingSkill = skill;
   return skill;
 }
@@ -241,9 +354,13 @@ function scheduleCounter() {
   if (connectedTabId === undefined || !settings.liveCounter) return;
   counterTimer = self.setTimeout(() => {
     void (async () => {
-      try { await readCounter(); }
-      catch (error) { log(error instanceof Error ? error.message : "Counter OCR failed.", "warn"); }
-      scheduleCounter();
+      try {
+        await readCounter();
+      } catch (error) {
+        log(`Counter OCR: ${errorText(error)}`, "warn");
+      } finally {
+        scheduleCounter();
+      }
     })();
   }, settings.counterIntervalSec * 1000);
 }
@@ -288,19 +405,27 @@ function confirmBoostSuccess() {
 function scheduleCooldown(seconds: number) {
   boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
   const sleepFor = seconds + settings.cooldownSafetySec;
-  log(`Cooldown read: ${seconds}s. No boost OCR until ${sleepFor}s later.`);
+  log(`Cooldown read: ${seconds}s. Boost OCR sleeping for ${sleepFor}s.`);
   boostCycle = undefined;
   clearTimer(verifyTimer);
   clearTimer(activeTimer);
   clearTimer(recheckTimer);
-  chrome.alarms.create(BOOST_WAKE, { when: Date.now() + sleepFor * 1000, persistAcrossSessions: false });
+  void chrome.alarms.clear(BOOST_WAKE).then(() => {
+    chrome.alarms.create(BOOST_WAKE, { when: Date.now() + sleepFor * 1000 });
+  });
 }
 
 async function beginBoostCycle() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined || boostCycle) return;
   boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0 };
-  await doubleE();
-  scheduleVerify();
+  try {
+    await doubleE();
+    scheduleVerify();
+  } catch (error) {
+    boostCycle = undefined;
+    boostFault = `Could not send E: ${errorText(error)}`;
+    log(boostFault, "error");
+  }
 }
 
 async function verifyBoostCycle() {
@@ -323,24 +448,24 @@ async function verifyBoostCycle() {
       if (!boostCycle.retryUsed) {
         boostCycle.retryUsed = true;
         boostTotals.activationRetries += 1;
-        log("Still Ready after activation; sending the single E ×2 retry.", "warn");
+        log("Chopping still Ready after 3s; sending the single E ×2 retry.", "warn");
         await doubleE();
         scheduleVerify();
         return;
       }
       boostTotals.failedActivations += 1;
-      boostFault = "Input was not confirmed after the one allowed retry.";
+      boostFault = "Input was not confirmed after the one allowed E ×2 retry.";
       boostCycle = undefined;
       log(boostFault, "error");
       return;
     }
     boostCycle.ambiguousReads += 1;
     const wait = boostCycle.ambiguousReads <= 2 ? 1 : settings.readyRetrySec;
-    log(`Boost OCR unclear (${boostCycle.ambiguousReads}); no key sent.`, "warn");
+    log(`Chopping OCR unclear (${boostCycle.ambiguousReads}); no key sent. Rechecking in ${wait}s.`, "warn");
     clearTimer(verifyTimer);
     verifyTimer = self.setTimeout(() => void verifyBoostCycle(), wait * 1000);
   } catch (error) {
-    log(error instanceof Error ? error.message : String(error), "warn");
+    log(`Boost verify: ${errorText(error)}`, "warn");
     if (boostCycle) scheduleVerify(settings.readyRetrySec);
   }
 }
@@ -363,7 +488,7 @@ async function activeBoostCheck() {
     }
     scheduleRecheck();
   } catch (error) {
-    log(error instanceof Error ? error.message : String(error), "warn");
+    log(`Active boost check: ${errorText(error)}`, "warn");
     scheduleRecheck();
   }
 }
@@ -384,19 +509,25 @@ async function wakeBoost() {
       scheduleActiveCheck();
       return;
     }
+    log(`Cooldown wake did not read Ready; checking again in ${settings.readyRetrySec}s.`, "warn");
     scheduleRecheck();
   } catch (error) {
-    log(error instanceof Error ? error.message : String(error), "warn");
+    log(`Boost wake: ${errorText(error)}`, "warn");
     scheduleRecheck();
   }
 }
 
 async function maybeArmBoostFromSnapshot() {
-  if (!settings.autoBoost || boostFault || boostCycle) return;
+  if (!settings.autoBoost || boostFault || boostCycle || connectedTabId === undefined) return;
   const observed = choppingSkill;
   if (observed.state === "ready") await beginBoostCycle();
   else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
   else if (observed.state === "active") scheduleActiveCheck();
+}
+
+async function closeOffscreen() {
+  if (!(await chrome.offscreen.hasDocument())) return;
+  try { await chrome.offscreen.closeDocument(); } catch { /* already closed */ }
 }
 
 async function disconnect(reason = "Disconnected") {
@@ -410,16 +541,41 @@ async function disconnect(reason = "Disconnected") {
   lastCounter = undefined;
   rollingBps = undefined;
   boostCycle = undefined;
+  activeOcrProfile = undefined;
+  lastViewport = undefined;
+  counterMisses = 0;
+  boostMisses = 0;
   if (tabId !== undefined) {
     try { await chrome.debugger.detach({ tabId }); } catch { /* already detached */ }
   }
   log(reason);
-  if (await chrome.offscreen.hasDocument()) {
-    try { await chrome.offscreen.closeDocument(); } catch { /* ignore */ }
+  await closeOffscreen();
+}
+
+async function attachOrRecover(tabId: number) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    return;
+  } catch (error) {
+    const message = errorText(error);
+    if (!/another debugger is already attached/i.test(message)) {
+      throw new Error(`Could not attach to Bloxd: ${message}`);
+    }
+
+    // A Manifest V3 service worker can restart while its debugger session is
+    // still attached. If the existing session belongs to this extension,
+    // sendCommand succeeds and we can safely adopt it instead of attaching twice.
+    try {
+      await directDebuggerCommand(tabId, "Page.getLayoutMetrics");
+      log("Recovered the existing OneBlock Analytics debugger session.");
+      return;
+    } catch {
+      throw new Error("Bloxd already has another debugger attached. Close Chrome DevTools or the other debugging extension for this tab, then press Scan now.");
+    }
   }
 }
 
-async function connectTab(tabId: number) {
+async function doConnect(tabId: number) {
   const tab = await chrome.tabs.get(tabId);
   if (!isOneBlockUrl(tab.url)) throw new Error("Open a Bloxd One Block tab first.");
   if (connectedTabId === tabId) {
@@ -427,22 +583,48 @@ async function connectTab(tabId: number) {
     return;
   }
   if (connectedTabId !== undefined) await disconnect("Switching One Block tab.");
-  try {
-    await chrome.debugger.attach({ tabId }, "1.3");
-  } catch (error) {
-    throw new Error(`Could not attach to Bloxd: ${error instanceof Error ? error.message : String(error)}`);
-  }
+
+  await attachOrRecover(tabId);
   connectedTabId = tabId;
   connectedUrl = tab.url;
   boostFault = undefined;
+  activeOcrProfile = undefined;
+  counterMisses = 0;
+  boostMisses = 0;
   log(`Connected to One Block${lobbyFromUrl(tab.url) ? ` lobby ${lobbyFromUrl(tab.url)}` : ""}.`);
+
   try {
-    await readFullSnapshot();
+    const snapshot = await readFullSnapshot(true);
+    if (snapshot.blocksMined === undefined) {
+      log("Connected, but the initial OCR did not find Blocks mined. Use Recalibrate OCR if the sidebar is visible.", "warn");
+    }
   } catch (error) {
-    log(error instanceof Error ? error.message : "Initial OCR failed.", "warn");
+    log(`Initial OCR: ${errorText(error)}`, "warn");
   }
+
   scheduleCounter();
   await maybeArmBoostFromSnapshot();
+}
+
+async function connectTab(tabId: number) {
+  if (connectedTabId === tabId) return;
+  if (connectFlight) {
+    if (connectingTabId === tabId) return connectFlight;
+    try { await connectFlight; } catch { /* the next connection can still try */ }
+    if (connectedTabId === tabId) return;
+  }
+
+  connectingTabId = tabId;
+  const flight = doConnect(tabId);
+  connectFlight = flight;
+  try {
+    await flight;
+  } finally {
+    if (connectFlight === flight) {
+      connectFlight = null;
+      connectingTabId = undefined;
+    }
+  }
 }
 
 async function activeTab(): Promise<chrome.tabs.Tab | undefined> {
@@ -461,11 +643,13 @@ async function scanForOneBlock(preferredTabId?: number) {
       }
     } catch { /* continue */ }
   }
+
   const active = await activeTab();
   if (active?.id !== undefined && isOneBlockUrl(active.url)) {
     await connectTab(active.id);
     return true;
   }
+
   const tabs = await chrome.tabs.query({ url: "https://bloxd.io/*" });
   const oneBlock = tabs.find(tab => tab.id !== undefined && isOneBlockUrl(tab.url));
   if (oneBlock?.id !== undefined) {
@@ -481,10 +665,12 @@ async function reconcileConnection() {
     if (connectedTabId === undefined) await scanForOneBlock();
     return;
   }
+
   if (!settings.manualEnabled) {
     if (connectedTabId !== undefined) await disconnect("Manual mode switched off.");
     return;
   }
+
   if (connectedTabId === undefined) {
     const tab = await activeTab();
     if (tab?.id !== undefined && isOneBlockUrl(tab.url)) await connectTab(tab.id);
@@ -494,8 +680,11 @@ async function reconcileConnection() {
 async function startSession(miningType: "active" | "afk") {
   if (connectedTabId === undefined) throw new Error("Connect to a One Block tab first.");
   if (activeSession) throw new Error("A session is already running.");
-  const snapshot = await readFullSnapshot();
-  if (snapshot.blocksMined === undefined) throw new Error("Could not read Blocks mined. Refresh the panel and try again.");
+  const snapshot = await readFullSnapshot(false);
+  if (snapshot.blocksMined === undefined) {
+    throw new Error("Could not read Blocks mined. Keep the One Block sidebar visible and use Recalibrate OCR, then try again.");
+  }
+
   activeSession = {
     id: crypto.randomUUID(),
     startedAtMs: Date.now(),
@@ -511,20 +700,27 @@ async function startSession(miningType: "active" | "afk") {
     }
   };
   await saveActiveSession();
-  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks.`);
+  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks. Full sidebar snapshot saved.`);
 }
 
 async function stopSession(): Promise<MiningSession> {
   if (!activeSession) throw new Error("No extension session is running.");
   if (connectedTabId === undefined) throw new Error("Reconnect to the same One Block game before stopping the session.");
-  const endSnapshot = await readFullSnapshot();
+
+  const endSnapshot = await readFullSnapshot(false);
   const startCounter = activeSession.startSnapshot.blocksMined;
   const endCounter = endSnapshot.blocksMined;
+
   if (activeSession.startSnapshot.owner && endSnapshot.owner && activeSession.startSnapshot.owner !== endSnapshot.owner) {
     throw new Error("Sidebar owner changed since the run started. The session was not saved; reconnect to the original island and retry.");
   }
-  if (startCounter === undefined || endCounter === undefined) throw new Error("Could not read a valid before/after Blocks mined value.");
-  if (endCounter <= startCounter) throw new Error("End counter is not greater than the start counter. The session was not saved; retry the final read.");
+  if (startCounter === undefined || endCounter === undefined) {
+    throw new Error("Could not read a valid before/after Blocks mined value. The run remains active so you can recalibrate and retry.");
+  }
+  if (endCounter <= startCounter) {
+    throw new Error("End counter is not greater than the start counter. The run remains active; retry the final read.");
+  }
+
   const endedAt = Date.now();
   const durationMs = endedAt - activeSession.startedAtMs;
   const blocksMined = endCounter - startCounter;
@@ -534,6 +730,7 @@ async function stopSession(): Promise<MiningSession> {
     failedActivations: Math.max(0, boostTotals.failedActivations - activeSession.boostStart.failedActivations),
     cooldownsRead: boostTotals.cooldownsRead.slice(activeSession.boostStart.cooldownCount)
   };
+
   const session: MiningSession = {
     id: activeSession.id,
     game: "bloxd",
@@ -557,9 +754,10 @@ async function stopSession(): Promise<MiningSession> {
     communityOptIn: false,
     cloudStatus: "local"
   };
+
   activeSession = undefined;
   await saveActiveSession();
-  log(`Session finished: ${blocksMined.toLocaleString()} blocks at ${session.averageBps.toFixed(5)} b/s.`);
+  log(`Session finished: ${blocksMined.toLocaleString()} blocks at ${session.averageBps.toFixed(5)} b/s. Final sidebar snapshot saved.`);
   return session;
 }
 
@@ -579,6 +777,9 @@ function status(): LiveExtensionStatus {
     lastOcrConfidence,
     lastOcrMs,
     readsLastMinute: ocrReads.length,
+    ocrProfile: activeOcrProfile,
+    viewportWidth: lastViewport?.width,
+    viewportHeight: lastViewport?.height,
     sessionActive: Boolean(activeSession),
     sessionStartedAt: activeSession ? new Date(activeSession.startedAtMs).toISOString() : undefined,
     sessionStartBlocks: activeSession?.startSnapshot.blocksMined,
@@ -593,6 +794,7 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
   const previousAutoBoost = settings.autoBoost;
   settings = sanitizeSettings({ ...settings, ...patch });
   await saveSettings();
+
   if (!settings.autoBoost) {
     boostFault = undefined;
     boostCycle = undefined;
@@ -604,13 +806,19 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
     recheckTimer = undefined;
     void chrome.alarms.clear(BOOST_WAKE);
   }
+
   if (settings.autoBoost && !previousAutoBoost) {
     boostFault = undefined;
     if (connectedTabId !== undefined) {
-      try { choppingSkill = await readBoost(); } catch { /* next scheduled read can recover */ }
+      try {
+        choppingSkill = await readBoost();
+      } catch (error) {
+        log(`Initial boost read: ${errorText(error)}`, "warn");
+      }
       await maybeArmBoostFromSnapshot();
     }
   }
+
   scheduleCounter();
   await reconcileConnection();
 }
@@ -627,10 +835,20 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         return { ok: true, status: status() };
       case "REFRESH_FULL":
         if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
-        await readFullSnapshot();
+        await readFullSnapshot(false);
+        return { ok: true, status: status() };
+      case "RECALIBRATE_OCR":
+        if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
+        activeOcrProfile = undefined;
+        counterMisses = 0;
+        boostMisses = 0;
+        await readFullSnapshot(true);
         return { ok: true, status: status() };
       case "SCAN_NOW":
-        await scanForOneBlock();
+        if (settings.mode === "manual" && !settings.manualEnabled) {
+          throw new Error("Manual mode is OFF. Switch Extension enabled ON before scanning.");
+        }
+        if (!(await scanForOneBlock())) throw new Error("No Bloxd One Block tab was found.");
         return { ok: true, status: status() };
       case "START_SESSION":
         await startSession(command.miningType);
@@ -655,7 +873,7 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         return { ok: true, status: status() };
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorText(error);
     log(message, "error");
     return { ok: false, status: status(), error: message };
   }
@@ -685,8 +903,9 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
       }
       return;
     }
+
     if (settings.mode === "auto" && connectedTabId === undefined && isOneBlockUrl(url)) {
-      try { await connectTab(tabId); } catch (error) { log(error instanceof Error ? error.message : String(error), "warn"); }
+      try { await connectTab(tabId); } catch (error) { log(errorText(error), "warn"); }
     }
   });
 });
@@ -694,7 +913,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   void ensureLoaded().then(async () => {
     if (settings.mode === "auto" && connectedTabId === undefined) {
-      try { await scanForOneBlock(tabId); } catch { /* wait for the next event */ }
+      try { await scanForOneBlock(tabId); } catch { /* next event/status poll can retry */ }
     } else if (settings.mode === "manual" && settings.manualEnabled && connectedTabId === undefined) {
       try {
         const tab = await chrome.tabs.get(tabId);
@@ -705,26 +924,28 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
-  if (connectedTabId === tabId) {
-    connectedTabId = undefined;
-    connectedUrl = undefined;
-    clearShortTimers();
-    void chrome.alarms.clear(BOOST_WAKE);
-    log("Connected One Block tab closed.", "warn");
-    void ensureLoaded().then(async () => {
-      if (settings.mode === "auto") await scanForOneBlock();
-    });
-  }
+  if (connectedTabId !== tabId) return;
+  connectedTabId = undefined;
+  connectedUrl = undefined;
+  activeOcrProfile = undefined;
+  lastViewport = undefined;
+  clearShortTimers();
+  void chrome.alarms.clear(BOOST_WAKE);
+  log("Connected One Block tab closed.", "warn");
+  void ensureLoaded().then(async () => {
+    if (settings.mode === "auto") await scanForOneBlock();
+  });
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
-  if (source.tabId === connectedTabId) {
-    connectedTabId = undefined;
-    connectedUrl = undefined;
-    clearShortTimers();
-    void chrome.alarms.clear(BOOST_WAKE);
-    log(`Debugger detached (${reason}).`, "warn");
-  }
+  if (source.tabId !== connectedTabId) return;
+  connectedTabId = undefined;
+  connectedUrl = undefined;
+  activeOcrProfile = undefined;
+  lastViewport = undefined;
+  clearShortTimers();
+  void chrome.alarms.clear(BOOST_WAKE);
+  log(`Debugger detached (${reason}).`, "warn");
 });
 
 chrome.runtime.onInstalled.addListener(() => {

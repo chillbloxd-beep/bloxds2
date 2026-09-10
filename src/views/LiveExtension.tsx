@@ -105,7 +105,7 @@ export function LiveExtension({
   }
 
   return <>
-    <PageHead eyebrow="BLOXD CONNECTION" title="Live One Block" subtitle="Local OCR reads only the right-side One Block panel. Any lobby is supported." />
+    <PageHead eyebrow="BLOXD CONNECTION" title="Live One Block" subtitle="Adaptive local OCR reads the right-side One Block panel. Any lobby is supported." />
 
     {error && <div className="callout warn"><strong>Action failed</strong><p>{error}</p></div>}
     {status.boostFault && <div className="callout warn"><strong>Auto boost paused</strong><p>{status.boostFault}</p><button className="quiet-button" onClick={() => void run(() => command({ target: "background", type: "CLEAR_BOOST_FAULT" }))}>Retry safely</button></div>}
@@ -123,7 +123,7 @@ export function LiveExtension({
           <button className={settings.mode === "auto" ? "active" : ""} onClick={() => void patch({ mode: "auto" })}>Auto</button>
         </div>
       </div>
-      {settings.mode === "manual" && <label className="switch-row"><span><strong>Extension enabled</strong><small>Off means no debugger connection, OCR, or automated input.</small></span><input type="checkbox" checked={settings.manualEnabled} onChange={event => void patch({ manualEnabled: event.target.checked })} /></label>}
+      {settings.mode === "manual" && <label className="switch-row"><span><strong>Extension enabled</strong><small>Off means no debugger connection, OCR, or automated input. Turn it on before Scan now.</small></span><input type="checkbox" checked={settings.manualEnabled} onChange={event => void patch({ manualEnabled: event.target.checked })} /></label>}
       {settings.mode === "auto" && <div className="mode-note">Auto detection is enabled. The extension connects when it sees <span className="mono">bloxd.io/play/oneBlock</span>; the <span className="mono">?lobby=</span> value does not affect detection.</div>}
     </Section>
 
@@ -145,18 +145,21 @@ export function LiveExtension({
           <label className="field"><span>Run type</span><select value={miningType} onChange={event => setMiningType(event.target.value as MiningType)}><option value="active">Active</option><option value="afk">AFK</option></select></label>
           <button className="primary-button full" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "START_SESSION", miningType }))}>Start run + capture sidebar</button>
         </> : <button className="primary-button full" disabled={busy || !status.connected} onClick={() => void finishSession()}>Finish run + capture sidebar</button>}
-        <p className="microcopy">A full right-sidebar OCR snapshot, including raw recognized text, is stored before and after extension-recorded runs. Those raw snapshots stay local and are not sent to community statistics.</p>
+        <p className="microcopy">A complete right-sidebar OCR snapshot, including raw recognized text, is stored before and after extension-recorded runs. If the final read fails, the run stays active so you can recalibrate and retry. Raw snapshots stay local and are not sent to community statistics.</p>
       </Section>
 
       <Section title="Chopping boost">
         <div className="boost-state"><Badge tone={skillTone(status.choppingSkill)}>{skillLabel(status.choppingSkill)}</Badge><span>{settings.autoBoost ? "Automation on" : "Automation off"}</span></div>
-        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Ready → E ×2 → wait 3s → verify. Known cooldowns sleep until cooldown + 2s.</small></span><input type="checkbox" checked={settings.autoBoost} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
+        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×2 → wait 3s → verify. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
         <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
       </Section>
     </div>
 
     <Section title="Current sidebar read">
-      <div className="section-inline-action"><button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "REFRESH_FULL" }))}>Refresh full panel</button></div>
+      <div className="section-inline-action">
+        <button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "REFRESH_FULL" }))}>Refresh full panel</button>
+        <button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "RECALIBRATE_OCR" }))}>Recalibrate OCR</button>
+      </div>
       <div className="sidebar-read-grid">
         <div><span>Banner</span><strong>{snapshot?.banner || "—"}</strong></div>
         <div><span>Owner</span><strong>{snapshot?.owner || "—"}</strong></div>
@@ -184,8 +187,14 @@ export function LiveExtension({
     </Section>
 
     <Section title="Diagnostics">
-      <div className="diagnostic-strip"><span>Last OCR <strong>{status.lastOcrMs === undefined ? "—" : `${status.lastOcrMs} ms`}</strong></span><span>OCR confidence <strong>{status.lastOcrConfidence === undefined ? "—" : `${status.lastOcrConfidence.toFixed(0)}%`}</strong></span><span>Reads/min <strong>{status.readsLastMinute}</strong></span></div>
-      <div className="diagnostic-log">{status.diagnostics.length ? status.diagnostics.slice(0, 20).map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span>{entry.message}</span></div>) : <span className="muted-text">No diagnostic events yet.</span>}</div>
+      <div className="diagnostic-strip">
+        <span>Last OCR <strong>{status.lastOcrMs === undefined ? "—" : `${status.lastOcrMs} ms`}</strong></span>
+        <span>OCR confidence <strong>{status.lastOcrConfidence === undefined ? "—" : `${status.lastOcrConfidence.toFixed(0)}%`}</strong></span>
+        <span>Reads/min <strong>{status.readsLastMinute}</strong></span>
+        <span>Crop <strong>{status.ocrProfile || "un-calibrated"}</strong></span>
+        <span>Viewport <strong>{status.viewportWidth && status.viewportHeight ? `${Math.round(status.viewportWidth)}×${Math.round(status.viewportHeight)}` : "—"}</strong></span>
+      </div>
+      <div className="diagnostic-log">{status.diagnostics.length ? status.diagnostics.slice(0, 24).map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span>{entry.message}</span></div>) : <span className="muted-text">No diagnostic events yet.</span>}</div>
       <button className="quiet-button danger" onClick={() => void run(() => command({ target: "background", type: "EMERGENCY_STOP" }))}>Emergency stop</button>
     </Section>
   </>;
