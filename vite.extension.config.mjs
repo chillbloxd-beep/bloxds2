@@ -78,7 +78,7 @@ export default defineConfig({
       input: {
         sidepanel: path.join(extensionRoot, "sidepanel.html"),
         offscreen: path.join(extensionRoot, "offscreen.html"),
-        background: path.join(extensionRoot, "background.ts")
+        background: path.join(extensionRoot, "background-v3.ts")
       },
       output: {
         entryFileNames: chunk => chunk.name === "background" ? "background.js" : "assets/[name]-[hash].js",
