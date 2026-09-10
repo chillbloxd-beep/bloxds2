@@ -1,7 +1,7 @@
 {
   "name": "oneblock-analytics",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,7 +22,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tesseract.js": "^7.0.0",
-    "tesseract.js-core": "^6.1.2"
+    "tesseract.js-core": "^7.0.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.8",
