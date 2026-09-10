@@ -197,7 +197,7 @@ function skillText(skill: SkillStateSnapshot): string {
 function setChoppingSkill(skill: SkillStateSnapshot) {
   const previous = skillText(choppingSkill);
   const next = skillText(skill);
-  setChoppingSkill(skill);
+  choppingSkill = skill;
   lastBoostReadAt = Date.now();
   if (currentSnapshot) {
     currentSnapshot.chopping = { ...(currentSnapshot.chopping || {}), skill };
