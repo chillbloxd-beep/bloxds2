@@ -28,7 +28,9 @@ const DEFAULT_SETTINGS: ExtensionSettings = {
   activeCheckSec: 1.5,
   cooldownSafetySec: 2,
   readyRetrySec: 3,
-  doubleTapGapMs: 150
+  doubleTapGapMs: 150,
+  cooldownSyncIntervalSec: 15,
+  precisionWindowSec: 4
 };
 
 let settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
@@ -44,7 +46,7 @@ let lastOcrMs: number | undefined;
 let ocrReads: number[] = [];
 let activeSession: ActiveExtensionSession | undefined;
 let boostFault: string | undefined;
-let boostCycle: { retryUsed: boolean; confirmed: boolean; ambiguousReads: number } | undefined;
+let boostCycle: { retryUsed: boolean; confirmed: boolean; ambiguousReads: number; readyConfirmReads: number } | undefined;
 let boostTotals = {
   successfulActivations: 0,
   activationRetries: 0,
@@ -70,6 +72,15 @@ let lastFullReadAt = 0;
 let boostCooldownReadyAt: number | undefined;
 let boostWakeAt: number | undefined;
 let liveRefreshFlight: Promise<void> | null = null;
+let predictedReadyAt: number | undefined;
+let lastBoostCaptureAt: number | undefined;
+let boostDriftSeconds: number | undefined;
+let lastCooldownSyncAt = 0;
+let precisionTimer: number | undefined;
+let precisionWindowActive = false;
+let dumbModeArmed = false;
+let dumbBaseline: { value: number; at: number } | undefined;
+let dumbArmSnapshot: SidebarSnapshot | undefined;
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -85,6 +96,11 @@ async function ensureLoaded() {
   if (loaded) return;
   const stored = await chrome.storage.local.get([SETTINGS_KEY, SESSION_KEY]);
   settings = { ...DEFAULT_SETTINGS, ...(stored[SETTINGS_KEY] || {}) };
+  if (settings.mode === "dumb") {
+    settings.autoBoost = true;
+    settings.liveCounter = true;
+    settings.cooldownSyncIntervalSec = 15;
+  }
   activeSession = stored[SESSION_KEY] as ActiveExtensionSession | undefined;
   loaded = true;
 }
@@ -97,7 +113,9 @@ function sanitizeSettings(next: ExtensionSettings): ExtensionSettings {
     activeCheckSec: Math.min(5, Math.max(0.75, Number(next.activeCheckSec) || 1.5)),
     cooldownSafetySec: Math.min(10, Math.max(0, Number(next.cooldownSafetySec) || 2)),
     readyRetrySec: Math.min(10, Math.max(1, Number(next.readyRetrySec) || 3)),
-    doubleTapGapMs: Math.min(600, Math.max(75, Number(next.doubleTapGapMs) || 150))
+    doubleTapGapMs: Math.min(600, Math.max(75, Number(next.doubleTapGapMs) || 150)),
+    cooldownSyncIntervalSec: Math.min(30, Math.max(5, Number(next.cooldownSyncIntervalSec) || 15)),
+    precisionWindowSec: Math.min(8, Math.max(2, Number(next.precisionWindowSec) || 4))
   };
 }
 
@@ -162,11 +180,12 @@ function orderedProfiles(view: OcrViewport): OcrCropProfile[] {
   return [activeOcrProfile, ...ordered.filter(profile => profile !== activeOcrProfile)];
 }
 
-async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrResponse> {
+async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrResponse & { captureAt: number }> {
   return enqueueOcr(async () => {
     await ensureOffscreen();
     const view = await viewport();
     const clip = cropRegion(profile, mode, view);
+    const captureAt = Date.now();
     const capture = await debuggerCommand<{ data: string }>("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
@@ -185,7 +204,7 @@ async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrRe
     if (!response) throw new Error(`OCR worker returned no response (${mode}/${profile}).`);
     if (!response.ok) throw new Error(`${response.error || "OCR failed"} [${mode}/${profile}]`);
     recordOcr(response);
-    return response;
+    return { ...response, captureAt };
   });
 }
 
@@ -209,11 +228,14 @@ function setChoppingSkill(skill: SkillStateSnapshot) {
   if (previous !== next) log(`Chopping state updated: ${previous} → ${next}.`);
 }
 
-function applySnapshot(snapshot: SidebarSnapshot) {
+function applySnapshot(snapshot: SidebarSnapshot, sampleAt = Date.now()) {
   currentSnapshot = snapshot;
   lastFullReadAt = Date.now();
-  if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined);
-  if (snapshot.chopping?.skill) setChoppingSkill(snapshot.chopping.skill);
+  if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined, sampleAt);
+  if (snapshot.chopping?.skill) {
+    lastBoostCaptureAt = sampleAt;
+    applyBoostObservation(snapshot.chopping.skill, sampleAt);
+  }
 }
 
 async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapshot> {
@@ -235,7 +257,7 @@ async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapsho
       if (isUsableSnapshot(snapshot)) {
         const changed = activeOcrProfile !== profile;
         activeOcrProfile = profile;
-        applySnapshot(snapshot!);
+        applySnapshot(snapshot!, response.captureAt);
         counterMisses = 0;
         if (changed) {
           log(`OCR calibrated to ${profile} for ${Math.round(view.width)}×${Math.round(view.height)} viewport.`);
@@ -273,7 +295,7 @@ async function readCounter(): Promise<number | undefined> {
   let response = await captureOcr("counter", primary);
   if (response.blocksMined !== undefined) {
     counterMisses = 0;
-    updateCounter(response.blocksMined);
+    updateCounter(response.blocksMined, response.captureAt);
     return response.blocksMined;
   }
 
@@ -288,7 +310,7 @@ async function readCounter(): Promise<number | undefined> {
     if (response.blocksMined !== undefined) {
       activeOcrProfile = profile;
       counterMisses = 0;
-      updateCounter(response.blocksMined);
+      updateCounter(response.blocksMined, response.captureAt);
       log(`Counter crop automatically recalibrated to ${profile}.`);
       return response.blocksMined;
     }
@@ -303,10 +325,11 @@ async function readBoost(): Promise<SkillStateSnapshot> {
   const view = await viewport();
   const profiles = orderedProfiles(view);
   let response = await captureOcr("boost", profiles[0]);
+  lastBoostCaptureAt = response.captureAt;
   let skill = response.choppingSkill || { state: "unknown" as const };
   if (skill.state !== "unknown") {
     boostMisses = 0;
-    setChoppingSkill(skill);
+    applyBoostObservation(skill, response.captureAt);
     return skill;
   }
 
@@ -320,7 +343,8 @@ async function readBoost(): Promise<SkillStateSnapshot> {
       if (skill.state !== "unknown") {
         activeOcrProfile = profile;
         boostMisses = 0;
-        setChoppingSkill(skill);
+        lastBoostCaptureAt = response.captureAt;
+        applyBoostObservation(skill, response.captureAt);
         log(`Boost crop automatically recalibrated to ${profile}.`);
         return skill;
       }
@@ -334,12 +358,44 @@ async function readBoost(): Promise<SkillStateSnapshot> {
     log("Chopping OCR unclear across the small boost crops; no E sent and no full-panel OCR forced.", "warn");
   }
 
-  setChoppingSkill(skill);
+  applyBoostObservation(skill, lastBoostCaptureAt || Date.now());
   return skill;
 }
 
-function updateCounter(value: number) {
-  const now = Date.now();
+function applyBoostObservation(skill: SkillStateSnapshot, captureAt: number) {
+  const previousPrediction = predictedReadyAt;
+  if (skill.state === "cooldown" && skill.cooldownSeconds !== undefined) {
+    const observedReadyAt = captureAt + skill.cooldownSeconds * 1000;
+    if (previousPrediction !== undefined && previousPrediction > captureAt) {
+      const drift = (observedReadyAt - previousPrediction) / 1000;
+      const predictedSeconds = Math.max(0, Math.ceil((previousPrediction - captureAt) / 1000));
+      if (Math.abs(drift) > 6) {
+        boostDriftSeconds = drift;
+        log(`Suspicious cooldown OCR: screen ${skill.cooldownSeconds}s vs predicted ${predictedSeconds}s (${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s). Keeping the prior prediction.`, "warn");
+        setChoppingSkill({ state: "cooldown", cooldownSeconds: predictedSeconds, raw: skill.raw });
+        return;
+      }
+      boostDriftSeconds = drift;
+      if (Math.abs(drift) >= 0.5) log(`Cooldown sync: screen ${skill.cooldownSeconds}s · drift ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s → resynced.`);
+    } else {
+      boostDriftSeconds = undefined;
+    }
+    predictedReadyAt = observedReadyAt;
+    boostCooldownReadyAt = observedReadyAt;
+  } else if (skill.state === "ready") {
+    if (previousPrediction !== undefined) boostDriftSeconds = (captureAt - previousPrediction) / 1000;
+    predictedReadyAt = captureAt;
+    boostCooldownReadyAt = captureAt;
+  } else if (skill.state === "active") {
+    predictedReadyAt = undefined;
+    boostCooldownReadyAt = undefined;
+    boostDriftSeconds = undefined;
+  }
+  setChoppingSkill(skill);
+}
+
+function updateCounter(value: number, sampleAt = Date.now()) {
+  const now = sampleAt;
   const previous = lastCounter;
   if (previous && value >= previous.value && now > previous.at) {
     const delta = value - previous.value;
@@ -363,10 +419,13 @@ function clearShortTimers() {
   clearTimer(activeTimer);
   clearTimer(recheckTimer);
   clearTimer(counterTimer);
+  clearTimer(precisionTimer);
   verifyTimer = undefined;
   activeTimer = undefined;
   recheckTimer = undefined;
   counterTimer = undefined;
+  precisionTimer = undefined;
+  precisionWindowActive = false;
 }
 
 function scheduleVerify(seconds = settings.verifyAfterPressSec) {
@@ -391,6 +450,8 @@ function scheduleCounter() {
   // panel is closed, no live counter OCR runs; start/end snapshots remain exact.
   clearTimer(counterTimer);
   counterTimer = undefined;
+  precisionTimer = undefined;
+  precisionWindowActive = false;
 }
 
 async function keyE() {
@@ -446,29 +507,97 @@ function confirmBoostSuccess() {
 
 function scheduleCooldown(seconds: number) {
   boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
-  const now = Date.now();
-  const sleepFor = seconds + settings.cooldownSafetySec;
-  boostCooldownReadyAt = now + seconds * 1000;
-  boostWakeAt = now + sleepFor * 1000;
+  const captureAt = lastBoostCaptureAt || Date.now();
+  predictedReadyAt = captureAt + seconds * 1000;
+  boostCooldownReadyAt = predictedReadyAt;
+  boostWakeAt = predictedReadyAt + settings.cooldownSafetySec * 1000;
+  lastCooldownSyncAt = captureAt;
+  precisionWindowActive = false;
   setChoppingSkill({ state: "cooldown", cooldownSeconds: seconds, raw: choppingSkill.raw });
-  log(`Cooldown read: ${seconds}s. Local countdown is live; boost OCR sleeps until ${new Date(boostWakeAt).toLocaleTimeString()}.`);
+  log(`Cooldown read: ${seconds}s at screenshot time. Tiny Chopping sync every ${settings.cooldownSyncIntervalSec}s; predicted Ready ${new Date(predictedReadyAt).toLocaleTimeString()}.`);
   boostCycle = undefined;
   clearTimer(verifyTimer);
   clearTimer(activeTimer);
   clearTimer(recheckTimer);
+  clearTimer(precisionTimer);
   void chrome.alarms.clear(BOOST_WAKE).then(() => {
-    chrome.alarms.create(BOOST_WAKE, { when: boostWakeAt! });
+    chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt!) });
   });
+}
+
+async function syncCooldown() {
+  if (!settings.autoBoost || connectedTabId === undefined || boostFault || !predictedReadyAt) return;
+  lastCooldownSyncAt = Date.now();
+  const before = predictedReadyAt;
+  try {
+    const observed = await readBoost();
+    if (observed.state === "ready") {
+      log("Cooldown sync saw actual Ready. Activating immediately.");
+      await beginBoostCycle();
+      return;
+    }
+    if (observed.state === "active") {
+      log("Cooldown sync saw Active. Waiting for the first numeric cooldown.");
+      scheduleActiveCheck();
+      return;
+    }
+    if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) {
+      const adjustment = predictedReadyAt === undefined ? 0 : (predictedReadyAt - before) / 1000;
+      log(`15s Chopping sync: screen ${observed.cooldownSeconds}s${Math.abs(adjustment) >= 0.05 ? ` · adjusted ${adjustment >= 0 ? "+" : ""}${adjustment.toFixed(2)}s` : " · matched prediction"}.`);
+    }
+  } catch (error) {
+    log(`15s Chopping sync failed: ${errorText(error)}. Keeping the last good prediction.`, "warn");
+  }
+}
+
+function enterPrecisionWindow() {
+  if (precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault) return;
+  precisionWindowActive = true;
+  clearTimer(precisionTimer);
+  const remaining = predictedReadyAt ? Math.max(0, (predictedReadyAt - Date.now()) / 1000) : 0;
+  log(`Precision window started at ${remaining.toFixed(2)}s predicted remaining. Blocks counter OCR is paused.`);
+  const tick = async () => {
+    if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle) return;
+    try {
+      const observed = await readBoost();
+      if (observed.state === "ready") {
+        precisionWindowActive = false;
+        const finishedAt = Date.now();
+        log(`Actual Ready confirmed. Recognition finished ${Math.max(0, finishedAt - (lastBoostCaptureAt || finishedAt))}ms after screenshot capture.`);
+        await beginBoostCycle();
+        return;
+      }
+      if (observed.state === "active") {
+        precisionWindowActive = false;
+        scheduleActiveCheck();
+        return;
+      }
+      if (observed.state === "cooldown" && predictedReadyAt !== undefined) {
+        const left = predictedReadyAt - Date.now();
+        if (left > settings.precisionWindowSec * 1000 + 1000) {
+          precisionWindowActive = false;
+          log("Precision window moved back after cooldown re-sync; returning to low-overhead monitoring.");
+          return;
+        }
+      }
+    } catch (error) {
+      log(`Precision Chopping OCR: ${errorText(error)}`, "warn");
+    }
+    precisionTimer = self.setTimeout(() => void tick(), 450);
+  };
+  precisionTimer = self.setTimeout(() => void tick(), 50);
 }
 
 async function beginBoostCycle() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined || boostCycle) return;
-  boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0 };
+  boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0, readyConfirmReads: 0 };
   try {
-    log("Chopping Ready confirmed. Starting primary E ×5 activation burst.");
+    const readyAt = Date.now();
+    log(`Chopping Ready confirmed. Starting primary E ×5 activation burst${lastBoostCaptureAt ? ` (${Math.max(0, readyAt - lastBoostCaptureAt)}ms after Ready screenshot)` : ""}.`);
     await pressEBurst(5, "Primary boost input");
-    log(`Primary E ×5 finished. Verifying Chopping state in ${settings.verifyAfterPressSec}s.`);
-    scheduleVerify();
+    const quickVerify = Math.min(0.65, settings.verifyAfterPressSec);
+    log(`Primary E ×5 finished. Fast verification in ${quickVerify.toFixed(2)}s.`);
+    scheduleVerify(quickVerify);
   } catch (error) {
     boostCycle = undefined;
     boostFault = `Could not send E: ${errorText(error)}`;
@@ -493,13 +622,19 @@ async function verifyBoostCycle() {
       return;
     }
     if (observed.state === "ready") {
+      if (!boostCycle.retryUsed && boostCycle.readyConfirmReads < 1) {
+        boostCycle.readyConfirmReads += 1;
+        log("Fast verification still reads Ready; confirming once more in 0.35s before backup E ×3.", "warn");
+        scheduleVerify(0.35);
+        return;
+      }
       if (!boostCycle.retryUsed) {
         boostCycle.retryUsed = true;
         boostTotals.activationRetries += 1;
-        log(`Chopping still Ready after ${settings.verifyAfterPressSec}s; starting backup E ×3 burst.`, "warn");
+        log("Ready confirmed twice after primary burst; starting backup E ×3 immediately.", "warn");
         await pressEBurst(3, "Backup boost input");
-        log(`Backup E ×3 finished. Verifying again in ${settings.verifyAfterPressSec}s.`);
-        scheduleVerify();
+        log("Backup E ×3 finished. Fast verification in 0.65s.");
+        scheduleVerify(0.65);
         return;
       }
       boostTotals.failedActivations += 1;
@@ -583,10 +718,27 @@ async function refreshLiveStateOnPoll() {
   if (liveRefreshFlight) return liveRefreshFlight;
   const flight = (async () => {
     const now = Date.now();
-    const boostSleeping = boostWakeAt !== undefined && now < boostWakeAt;
-    let boostReadRan = false;
 
-    if (settings.autoBoost && !boostFault && !boostCycle && !boostSleeping && now - lastBoostReadAt >= 2000) {
+    if (settings.mode === "dumb" && !activeSession && dumbModeArmed && now - lastCounterReadAt >= 2000) {
+      try { await dumbModeCounterTick(); } catch (error) { log(`Dumb mode mining detector: ${errorText(error)}`, "warn"); }
+      return;
+    }
+
+    const synchronizedCooldown = settings.autoBoost && choppingSkill.state === "cooldown" && predictedReadyAt !== undefined;
+    if (synchronizedCooldown && predictedReadyAt !== undefined) {
+      const remainingMs = predictedReadyAt - now;
+      if (remainingMs <= settings.precisionWindowSec * 1000) {
+        enterPrecisionWindow();
+        return;
+      }
+      if (now - lastCooldownSyncAt >= settings.cooldownSyncIntervalSec * 1000) {
+        await syncCooldown();
+        return;
+      }
+    }
+
+    let boostReadRan = false;
+    if (settings.autoBoost && !boostFault && !boostCycle && !synchronizedCooldown && now - lastBoostReadAt >= 2000) {
       boostReadRan = true;
       try {
         const observed = await readBoost();
@@ -600,17 +752,16 @@ async function refreshLiveStateOnPoll() {
     }
 
     const afterBoost = Date.now();
-    if (!boostReadRan && settings.liveCounter && afterBoost - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
+    if (!precisionWindowActive && !boostReadRan && settings.liveCounter && afterBoost - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
       try {
         const value = await readCounter();
         if (value === undefined) log("Live counter refresh did not get a number; it will retry automatically.", "warn");
       } catch (error) {
         log(`Live counter refresh: ${errorText(error)}`, "warn");
       }
+    } else if (precisionWindowActive && settings.liveCounter && afterBoost - lastCounterReadAt >= settings.counterIntervalSec * 1000) {
+      log("Blocks counter OCR deferred because Chopping is in the precision Ready window.");
     }
-
-    // No automatic full-panel OCR while mining. Full sidebar snapshots are
-    // limited to connect, run start/end, and explicit Refresh/Recalibrate.
   })();
   liveRefreshFlight = flight;
   try {
@@ -645,6 +796,14 @@ async function disconnect(reason = "Disconnected") {
   lastFullReadAt = 0;
   boostCooldownReadyAt = undefined;
   boostWakeAt = undefined;
+  predictedReadyAt = undefined;
+  lastBoostCaptureAt = undefined;
+  boostDriftSeconds = undefined;
+  lastCooldownSyncAt = 0;
+  precisionWindowActive = false;
+  dumbModeArmed = false;
+  dumbBaseline = undefined;
+  dumbArmSnapshot = undefined;
   if (tabId !== undefined) {
     try { await chrome.debugger.detach({ tabId }); } catch { /* already detached */ }
   }
@@ -704,6 +863,8 @@ async function doConnect(tabId: number) {
 
   scheduleCounter();
   await maybeArmBoostFromSnapshot();
+  if (settings.mode === "dumb") armDumbMode();
+  if (settings.mode === "dumb") armDumbMode();
 }
 
 async function connectTab(tabId: number) {
@@ -761,7 +922,7 @@ async function scanForOneBlock(preferredTabId?: number) {
 
 async function reconcileConnection() {
   await ensureLoaded();
-  if (settings.mode === "auto") {
+  if (settings.mode === "auto" || settings.mode === "dumb") {
     if (connectedTabId === undefined) await scanForOneBlock();
     return;
   }
@@ -777,17 +938,17 @@ async function reconcileConnection() {
   }
 }
 
-async function startSession(miningType: "active" | "afk") {
+async function startSession(miningType: "active" | "afk", preset?: { snapshot: SidebarSnapshot; startedAtMs: number }) {
   if (connectedTabId === undefined) throw new Error("Connect to a One Block tab first.");
   if (activeSession) throw new Error("A session is already running.");
-  const snapshot = await readFullSnapshot(false);
+  const snapshot = preset?.snapshot || await readFullSnapshot(false);
   if (snapshot.blocksMined === undefined) {
     throw new Error("Could not read Blocks mined. Keep the One Block sidebar visible and use Recalibrate OCR, then try again.");
   }
 
   activeSession = {
     id: crypto.randomUUID(),
-    startedAtMs: Date.now(),
+    startedAtMs: preset?.startedAtMs || Date.now(),
     miningType,
     startSnapshot: snapshot,
     connectionMode: settings.mode,
@@ -801,7 +962,37 @@ async function startSession(miningType: "active" | "afk") {
   };
   await saveActiveSession();
   lastCounterReadAt = 0; // Force a fresh small counter read on the next 1s UI poll.
-  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks. Full sidebar snapshot saved; live counter refresh armed.`);
+  log(`Session started at ${snapshot.blocksMined.toLocaleString()} blocks${preset ? " (Dumb mode auto-start)" : ""}. Full sidebar snapshot saved; live counter refresh armed.`);
+}
+
+function armDumbMode() {
+  if (settings.mode !== "dumb" || activeSession || connectedTabId === undefined || dumbModeArmed) return;
+  const counter = lastCounter?.value ?? currentSnapshot?.blocksMined;
+  if (counter === undefined) return;
+  dumbArmSnapshot = currentSnapshot ? { ...currentSnapshot, blocksMined: counter } : { capturedAt: new Date().toISOString(), rawText: "", lines: [], blocksMined: counter };
+  dumbBaseline = { value: counter, at: lastCounter?.at || Date.now() };
+  dumbModeArmed = true;
+  log(`Dumb mode armed at ${counter.toLocaleString()} blocks. Start mining and an AFK run will begin automatically.`);
+}
+
+async function dumbModeCounterTick() {
+  if (settings.mode !== "dumb" || activeSession || !dumbModeArmed || connectedTabId === undefined) return false;
+  const previous = dumbBaseline;
+  if (!previous) { armDumbMode(); return false; }
+  const value = await readCounter();
+  const current = lastCounter;
+  if (value === undefined || !current) return true;
+  if (value > previous.value) {
+    const baseSnapshot: SidebarSnapshot = dumbArmSnapshot || currentSnapshot || { capturedAt: new Date(previous.at).toISOString(), rawText: "", lines: [] };
+    const startSnapshot: SidebarSnapshot = { ...baseSnapshot, blocksMined: previous.value };
+    dumbModeArmed = false;
+    dumbBaseline = undefined;
+    log(`Dumb mode detected mining (${previous.value.toLocaleString()} → ${value.toLocaleString()}). Auto-starting AFK run from the previous counter sample.`);
+    await startSession("afk", { snapshot: startSnapshot, startedAtMs: previous.at });
+    return true;
+  }
+  dumbBaseline = { value, at: current.at };
+  return true;
 }
 
 async function stopSession(): Promise<MiningSession> {
@@ -866,10 +1057,11 @@ function status(): LiveExtensionStatus {
   const now = Date.now();
   ocrReads = ocrReads.filter(at => now - at < 60_000);
   let liveChoppingSkill = choppingSkill;
-  if (choppingSkill.state === "cooldown" && boostCooldownReadyAt !== undefined) {
+  if (choppingSkill.state === "cooldown" && (predictedReadyAt !== undefined || boostCooldownReadyAt !== undefined)) {
+    const readyAt = predictedReadyAt ?? boostCooldownReadyAt!;
     liveChoppingSkill = {
       ...choppingSkill,
-      cooldownSeconds: Math.max(0, Math.ceil((boostCooldownReadyAt - now) / 1000))
+      cooldownSeconds: Math.max(0, Math.ceil((readyAt - now) / 1000))
     };
   }
   const liveSnapshot = currentSnapshot ? { ...currentSnapshot } : undefined;
@@ -896,6 +1088,10 @@ function status(): LiveExtensionStatus {
     sessionStartedAt: activeSession ? new Date(activeSession.startedAtMs).toISOString() : undefined,
     sessionStartBlocks: activeSession?.startSnapshot.blocksMined,
     boostFault,
+    predictedReadyAt,
+    lastBoostCaptureAt,
+    boostDriftSeconds,
+    dumbModeArmed,
     settings,
     currentSnapshot: liveSnapshot,
     diagnostics
@@ -904,7 +1100,13 @@ function status(): LiveExtensionStatus {
 
 async function setSettings(patch: Partial<ExtensionSettings>) {
   const previousAutoBoost = settings.autoBoost;
+  const previousMode = settings.mode;
   settings = sanitizeSettings({ ...settings, ...patch });
+  if (settings.mode === "dumb") {
+    settings.autoBoost = true;
+    settings.liveCounter = true;
+    settings.cooldownSyncIntervalSec = 15;
+  }
   await saveSettings();
 
   if (!settings.autoBoost) {
@@ -935,6 +1137,8 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
 
   scheduleCounter();
   await reconcileConnection();
+  if (settings.mode === "dumb" && previousMode !== "dumb" && connectedTabId !== undefined && !activeSession) armDumbMode();
+  if (settings.mode !== "dumb") { dumbModeArmed = false; dumbBaseline = undefined; dumbArmSnapshot = undefined; }
 }
 
 async function handleCommand(command: BackgroundCommand): Promise<BackgroundResponse> {
@@ -988,6 +1192,10 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         return { ok: true, status: status() };
       case "EMERGENCY_STOP":
         settings = { ...settings, mode: "manual", manualEnabled: false, autoBoost: false };
+        precisionWindowActive = false;
+        dumbModeArmed = false;
+        precisionWindowActive = false;
+        dumbModeArmed = false;
         await saveSettings();
         boostFault = undefined;
         await disconnect("Emergency stop: extension disabled.");
@@ -1010,6 +1218,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== BOOST_WAKE) return;
   boostWakeAt = undefined;
+  if (precisionWindowActive) {
+    log("Cooldown wake alarm fired while precision watcher is already active; duplicate OCR skipped.");
+    return;
+  }
   log("Cooldown wake alarm fired; checking Chopping state now.");
   void ensureLoaded().then(wakeBoost);
 });
@@ -1020,14 +1232,14 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
     if (connectedTabId === tabId) {
       if (!isOneBlockUrl(url)) {
         await disconnect("Connected tab left One Block.");
-        if (settings.mode === "auto") await scanForOneBlock();
+        if (settings.mode === "auto" || settings.mode === "dumb") await scanForOneBlock();
       } else {
         connectedUrl = url;
       }
       return;
     }
 
-    if (settings.mode === "auto" && connectedTabId === undefined && isOneBlockUrl(url)) {
+    if ((settings.mode === "auto" || settings.mode === "dumb") && connectedTabId === undefined && isOneBlockUrl(url)) {
       try { await connectTab(tabId); } catch (error) { log(errorText(error), "warn"); }
     }
   });
@@ -1035,7 +1247,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   void ensureLoaded().then(async () => {
-    if (settings.mode === "auto" && connectedTabId === undefined) {
+    if ((settings.mode === "auto" || settings.mode === "dumb") && connectedTabId === undefined) {
       try { await scanForOneBlock(tabId); } catch { /* next event/status poll can retry */ }
     } else if (settings.mode === "manual" && settings.manualEnabled && connectedTabId === undefined) {
       try {
@@ -1056,7 +1268,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
   void chrome.alarms.clear(BOOST_WAKE);
   log("Connected One Block tab closed.", "warn");
   void ensureLoaded().then(async () => {
-    if (settings.mode === "auto") await scanForOneBlock();
+    if (settings.mode === "auto" || settings.mode === "dumb") await scanForOneBlock();
   });
 });
 
