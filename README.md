@@ -70,7 +70,7 @@ The automation targets the **Chopping** skill specifically; it does not react to
 ```text
 Chopping Skill: Ready
         ↓
-E → short gap → E
+E ×5 primary burst
         ↓
 wait 3 seconds
         ↓
@@ -81,9 +81,9 @@ After the check:
 
 - `Active` = activation confirmed.
 - A number such as `157s` = activation confirmed and cooldown already started.
-- `Ready` = send **one** additional E ×2 retry, then verify again.
+- `Ready` = send **one** backup E ×3 burst, then verify again.
 - unclear OCR = send no key and re-read later.
-- still `Ready` after the single retry = pause auto boost with an input-not-confirmed fault instead of repeatedly pressing E.
+- still `Ready` after the single backup burst = pause auto boost with an input-not-confirmed fault instead of repeatedly pressing E.
 
 When the first countdown value appears, for example `157s`, boost OCR stops for that cooldown. The next boost check is scheduled for `157 + 2` seconds by default. If it is not Ready then, the extension waits 3 seconds before another check. These timings are configurable.
 
@@ -92,7 +92,7 @@ The current packaged build declares Chrome 150+ so its debugger/service-worker a
 ### Performance behavior
 
 - full sidebar OCR: startup, refresh, run start/end only
-- counter OCR: small `Blocks mined` crop, default every 10 seconds while enabled
+- counter OCR: small `Blocks mined` crop, default every 5 seconds while enabled; side-panel status polling also drives recovery if a service-worker timer was suspended
 - boost OCR: only during state transitions and after scheduled cooldown wake-up
 - known cooldown: no repeated boost OCR for every displayed second
 - OCR worker is lazy-loaded on the first read
@@ -190,3 +190,8 @@ CI validates source compilation, parser tests, both production builds and the pa
 ### v0.3.1 Auto Boost bootstrap fix
 
 Auto Boost now keeps rechecking when the first Chopping OCR state is unknown instead of remaining idle. The first unknown boost crop immediately tries alternate calibrated crops. E dispatch brings the connected Bloxd target to the front and uses raw key-down input, which is better suited to game keyboard handlers. A **Test E ×2** diagnostic (available while Auto Boost is off) separates OCR/state-detection failures from keyboard-input failures.
+
+
+### v0.3.2 live refresh
+
+The extension side panel polls live state once per second. Counter OCR is due every 5 seconds by default, Chopping is re-read during actionable states, the visible cooldown decrements locally without OCRing every second, and the parsed full sidebar refreshes periodically while the panel is open. A floating Action Log mirrors the newest diagnostics, including each attempted E press.
