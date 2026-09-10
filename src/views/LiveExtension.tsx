@@ -52,7 +52,7 @@ export function LiveExtension({
 
   useEffect(() => {
     void refresh();
-    const statusTimer = window.setInterval(() => void refresh(), 1000);
+    const statusTimer = window.setInterval(() => void refresh(), 2000);
     const clockTimer = window.setInterval(() => forceClock(value => value + 1), 1000);
     return () => {
       window.clearInterval(statusTimer);
@@ -139,7 +139,7 @@ export function LiveExtension({
         <div className="run-capture-state">
           <span>{status.sessionActive ? "RUNNING" : "READY"}</span>
           <strong>{status.sessionActive ? elapsed(status.sessionStartedAt) : "No active session"}</strong>
-          {status.sessionActive && <small>{counterDelta === undefined ? "Waiting for counter sample" : `${formatInteger(counterDelta)} blocks since start`}</small>}
+          {status.sessionActive && <small>{counterDelta === undefined ? "Waiting for counter sample" : counterDelta === 0 ? `Live counter sampling every ${settings.counterIntervalSec}s` : `${formatInteger(counterDelta)} blocks since start`}</small>}
         </div>
         {!status.sessionActive ? <>
           <label className="field"><span>Run type</span><select value={miningType} onChange={event => setMiningType(event.target.value as MiningType)}><option value="active">Active</option><option value="afk">AFK</option></select></label>
@@ -179,14 +179,14 @@ export function LiveExtension({
 
     <Section title="Performance / timing">
       <div className="advanced-grid">
-        <label className="field"><span>Counter interval (s)</span><input type="number" min="5" max="60" value={settings.counterIntervalSec} onChange={event => void patch({ counterIntervalSec: Number(event.target.value) })} /></label>
+        <label className="field"><span>Counter interval (s)</span><input type="number" min="10" max="180" value={settings.counterIntervalSec} onChange={event => void patch({ counterIntervalSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Verify after E (s)</span><input type="number" min="1" max="10" step="0.5" value={settings.verifyAfterPressSec} onChange={event => void patch({ verifyAfterPressSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Active check (s)</span><input type="number" min="0.75" max="5" step="0.25" value={settings.activeCheckSec} onChange={event => void patch({ activeCheckSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Cooldown safety (s)</span><input type="number" min="0" max="10" step="0.5" value={settings.cooldownSafetySec} onChange={event => void patch({ cooldownSafetySec: Number(event.target.value) })} /></label>
         <label className="field"><span>Not-ready recheck (s)</span><input type="number" min="1" max="10" step="0.5" value={settings.readyRetrySec} onChange={event => void patch({ readyRetrySec: Number(event.target.value) })} /></label>
         <label className="field"><span>E burst gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
       </div>
-      <p className="microcopy">The boost watcher does not OCR each countdown second. After reading a cooldown such as 157s, it schedules its next boost check for 157s + the safety delay.</p>
+      <p className="microcopy">Low-overhead mode: full sidebar OCR runs only on connect, run start/end, Refresh full panel, or Recalibrate. The live counter uses only a tiny crop at the interval above (20s default). Chopping uses its own tiny crop only around Ready / verification / cooldown transitions. During a known cooldown, boost OCR sleeps completely until the scheduled wake.</p>
     </Section>
 
     <div className="floating-action-log">
