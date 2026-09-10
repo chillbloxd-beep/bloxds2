@@ -29,12 +29,6 @@ function formatRate6(value?: number) {
   return value.toPrecision(6);
 }
 
-function formatRate6(value?: number) {
-  if (value === undefined || !Number.isFinite(value)) return "—";
-  if (value === 0) return "0.00000";
-  return value.toPrecision(6);
-}
-
 function elapsed(startedAt?: string) {
   if (!startedAt) return "—";
   return formatDuration(Math.max(0, Date.now() - new Date(startedAt).getTime()), true);
