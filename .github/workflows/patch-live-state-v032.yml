@@ -1,0 +1,34 @@
+name: Apply v0.3.2 live-state patch
+
+on:
+  push:
+    branches: [fix/live-state-v032]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/live-state-v032
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply live-state patch
+        run: node scripts/patch-live-state-v032.mjs
+      - name: Commit patch if changed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Patch already applied."
+            exit 0
+          fi
+          git config user.name "OneBlock Analytics CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add extension/background-v3.ts src/views/LiveExtension.tsx src/styles.css package.json extension/public/manifest.json README.md
+          git commit -m "Fix live run updates and boost state refresh"
+          git push origin HEAD:fix/live-state-v032
