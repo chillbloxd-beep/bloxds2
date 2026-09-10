@@ -284,7 +284,9 @@ async function readBoost(): Promise<SkillStateSnapshot> {
   }
 
   boostMisses += 1;
-  if (boostMisses >= 2) {
+  // Bootstrap reliability: one unknown Chopping read immediately tries the
+  // alternate calibrated crops instead of leaving Auto Boost idle.
+  if (boostMisses >= 1) {
     for (const profile of profiles.slice(1)) {
       response = await captureOcr("boost", profile);
       skill = response.choppingSkill || { state: "unknown" as const };
@@ -367,11 +369,10 @@ function scheduleCounter() {
 
 async function keyE() {
   await debuggerCommand("Input.dispatchKeyEvent", {
-    type: "keyDown",
+    type: "rawKeyDown",
     key: "e",
     code: "KeyE",
-    text: "e",
-    unmodifiedText: "e",
+    autoRepeat: false,
     windowsVirtualKeyCode: 69,
     nativeVirtualKeyCode: 69
   });
@@ -389,10 +390,15 @@ function delay(ms: number) {
 }
 
 async function doubleE() {
+  // The side panel can own keyboard focus after the user changes a toggle.
+  // Bring the already-connected Bloxd target to the front before dispatching
+  // trusted DevTools-protocol key input. This does not click or move the mouse.
+  await debuggerCommand("Page.bringToFront");
+  await delay(60);
   await keyE();
   await delay(settings.doubleTapGapMs);
   await keyE();
-  log(`Sent E ×2 (${settings.doubleTapGapMs} ms gap).`);
+  log(`Focused Bloxd and sent E ×2 (${settings.doubleTapGapMs} ms gap).`);
 }
 
 function confirmBoostSuccess() {
@@ -523,6 +529,13 @@ async function maybeArmBoostFromSnapshot() {
   if (observed.state === "ready") await beginBoostCycle();
   else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
   else if (observed.state === "active") scheduleActiveCheck();
+  else {
+    // v0.3.0 could stop here forever when the first OCR read was unknown.
+    // Keep the watcher alive without sending any input until Chopping is
+    // positively identified as Ready/Active/cooldown.
+    log(`Auto Boost waiting for a clear Chopping state; rechecking in ${settings.readyRetrySec}s.`, "warn");
+    scheduleRecheck();
+  }
 }
 
 async function closeOffscreen() {
@@ -857,6 +870,12 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         const session = await stopSession();
         return { ok: true, status: status(), session };
       }
+      case "TEST_E":
+        if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
+        if (settings.autoBoost) throw new Error("Turn Auto-use Chopping skill OFF before using Test E ×2.");
+        log("Manual E ×2 input diagnostic requested.");
+        await doubleE();
+        return { ok: true, status: status() };
       case "CLEAR_BOOST_FAULT":
         boostFault = undefined;
         boostCycle = undefined;

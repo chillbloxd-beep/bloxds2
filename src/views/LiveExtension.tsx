@@ -152,6 +152,9 @@ export function LiveExtension({
         <div className="boost-state"><Badge tone={skillTone(status.choppingSkill)}>{skillLabel(status.choppingSkill)}</Badge><span>{settings.autoBoost ? "Automation on" : "Automation off"}</span></div>
         <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×2 → wait 3s → verify. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
         <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
+        <div className="mode-note"><strong>Watcher:</strong> {settings.autoBoost ? (status.boostFault ? "Paused by fault" : status.choppingSkill.state === "unknown" ? "Waiting for clear Chopping OCR; auto-rechecking" : `Armed · ${skillLabel(status.choppingSkill)}`) : "Off"}</div>
+        <button className="quiet-button" disabled={busy || !status.connected || settings.autoBoost} onClick={() => void run(() => command({ target: "background", type: "TEST_E" }))}>Test E ×2</button>
+        <p className="microcopy">Input diagnostic only: turn Auto-use Chopping skill off, stand in-game with the skill Ready, then press Test E ×2. If Mega Chop activates, debugger keyboard input is working and any remaining issue is OCR/state detection.</p>
       </Section>
     </div>
 
