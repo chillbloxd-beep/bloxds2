@@ -23,6 +23,12 @@ function skillTone(skill?: SkillStateSnapshot): "good" | "warn" | "neutral" {
   return "neutral";
 }
 
+function formatRate6(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  if (value === 0) return "0.00000";
+  return value.toPrecision(6);
+}
+
 function elapsed(startedAt?: string) {
   if (!startedAt) return "—";
   return formatDuration(Math.max(0, Date.now() - new Date(startedAt).getTime()), true);
@@ -121,15 +127,17 @@ export function LiveExtension({
         <div className="segmented">
           <button className={settings.mode === "manual" ? "active" : ""} onClick={() => void patch({ mode: "manual" })}>Manual</button>
           <button className={settings.mode === "auto" ? "active" : ""} onClick={() => void patch({ mode: "auto" })}>Auto</button>
+          <button className={settings.mode === "dumb" ? "active" : ""} onClick={() => void patch({ mode: "dumb" })}>Dumb</button>
         </div>
       </div>
       {settings.mode === "manual" && <label className="switch-row"><span><strong>Extension enabled</strong><small>Off means no debugger connection, OCR, or automated input. Turn it on before Scan now.</small></span><input type="checkbox" checked={settings.manualEnabled} onChange={event => void patch({ manualEnabled: event.target.checked })} /></label>}
-      {settings.mode === "auto" && <div className="mode-note">Auto detection is enabled. The extension connects when it sees <span className="mono">bloxd.io/play/oneBlock</span>; the <span className="mono">?lobby=</span> value does not affect detection.</div>}
+      {(settings.mode === "auto" || settings.mode === "dumb") && <div className="mode-note">Auto detection is enabled. The extension connects when it sees <span className="mono">bloxd.io/play/oneBlock</span>; the <span className="mono">?lobby=</span> value does not affect detection.</div>}
+      {settings.mode === "dumb" && <div className="mode-note"><strong>Dumb mode:</strong> Auto connection + Auto Chopping + 15s cooldown synchronization + live counter. {status.sessionActive ? "AFK run is recording." : status.dumbModeArmed ? "Start mining; the AFK run will auto-start from the previous counter sample." : "Arming mining detector…"}</div>}
     </Section>
 
     <div className="metric-strip extension-metrics">
       <Metric label="Blocks mined" value={status.blocksMined === undefined ? "—" : formatInteger(status.blocksMined)} />
-      <Metric label="Rolling speed" value={formatRate(status.rollingBps)} suffix=" b/s" />
+      <Metric label="Rolling speed" value={formatRate6(status.rollingBps)} suffix=" b/s" />
       <Metric label="Phase" value={status.phase || "—"} />
       <Metric label="Chopping" value={skillLabel(status.choppingSkill)} />
     </div>
@@ -141,7 +149,7 @@ export function LiveExtension({
           <strong>{status.sessionActive ? elapsed(status.sessionStartedAt) : "No active session"}</strong>
           {status.sessionActive && <small>{counterDelta === undefined ? "Waiting for counter sample" : counterDelta === 0 ? `Live counter sampling every ${settings.counterIntervalSec}s` : `${formatInteger(counterDelta)} blocks since start`}</small>}
         </div>
-        {!status.sessionActive ? <>
+        {!status.sessionActive ? settings.mode === "dumb" ? <div className="mode-note"><strong>Automatic AFK recording armed.</strong> Start mining normally. A tiny counter check detects the first increase and starts the run automatically; no full OCR is triggered mid-mining.</div> : <>
           <label className="field"><span>Run type</span><select value={miningType} onChange={event => setMiningType(event.target.value as MiningType)}><option value="active">Active</option><option value="afk">AFK</option></select></label>
           <button className="primary-button full" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "START_SESSION", miningType }))}>Start run + capture sidebar</button>
         </> : <button className="primary-button full" disabled={busy || !status.connected} onClick={() => void finishSession()}>Finish run + capture sidebar</button>}
@@ -150,8 +158,8 @@ export function LiveExtension({
 
       <Section title="Chopping boost">
         <div className="boost-state"><Badge tone={skillTone(status.choppingSkill)}>{skillLabel(status.choppingSkill)}</Badge><span>{settings.autoBoost ? "Automation on" : "Automation off"}</span></div>
-        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×5 → wait 3s → verify. If still Ready, one backup E ×3 burst is sent. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
-        <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
+        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×5 → wait 3s → verify. If still Ready, one backup E ×3 burst is sent. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} disabled={settings.mode === "dumb"} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
+        <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} disabled={settings.mode === "dumb"} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
         <div className="mode-note"><strong>Watcher:</strong> {settings.autoBoost ? (status.boostFault ? "Paused by fault" : status.choppingSkill.state === "unknown" ? "Waiting for clear Chopping OCR; auto-rechecking" : `Armed · ${skillLabel(status.choppingSkill)}`) : "Off"}</div>
         <button className="quiet-button" disabled={busy || !status.connected || settings.autoBoost} onClick={() => void run(() => command({ target: "background", type: "TEST_E" }))}>Test E ×5</button>
         <p className="microcopy">Input diagnostic only: turn Auto-use Chopping skill off, stand in-game with the skill Ready, then press Test E ×5. The Action Log records the focus attempt and every E press individually.</p>
@@ -185,8 +193,10 @@ export function LiveExtension({
         <label className="field"><span>Cooldown safety (s)</span><input type="number" min="0" max="10" step="0.5" value={settings.cooldownSafetySec} onChange={event => void patch({ cooldownSafetySec: Number(event.target.value) })} /></label>
         <label className="field"><span>Not-ready recheck (s)</span><input type="number" min="1" max="10" step="0.5" value={settings.readyRetrySec} onChange={event => void patch({ readyRetrySec: Number(event.target.value) })} /></label>
         <label className="field"><span>E burst gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
+        <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
+        <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
       </div>
-      <p className="microcopy">Low-overhead mode: full sidebar OCR runs only on connect, run start/end, Refresh full panel, or Recalibrate. The live counter uses only a tiny crop at the interval above (20s default). Chopping uses its own tiny crop only around Ready / verification / cooldown transitions. During a known cooldown, boost OCR sleeps completely until the scheduled wake.</p>
+      <p className="microcopy">Precision low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. Chopping uses only its tiny crop every 15s by default to re-sync the real countdown. Near predicted Ready it enters a short precision window, pauses counter OCR, and checks Chopping rapidly until the current game UI actually says Ready. E is never triggered by the local timer alone.</p>
     </Section>
 
     <div className="floating-action-log">
@@ -201,6 +211,8 @@ export function LiveExtension({
         <span>Reads/min <strong>{status.readsLastMinute}</strong></span>
         <span>Crop <strong>{status.ocrProfile || "un-calibrated"}</strong></span>
         <span>Viewport <strong>{status.viewportWidth && status.viewportHeight ? `${Math.round(status.viewportWidth)}×${Math.round(status.viewportHeight)}` : "—"}</strong></span>
+        <span>Ready prediction <strong>{status.predictedReadyAt ? `${Math.max(0, (status.predictedReadyAt - Date.now()) / 1000).toFixed(2)}s` : "—"}</strong></span>
+        <span>Cooldown drift <strong>{status.boostDriftSeconds === undefined ? "—" : `${status.boostDriftSeconds >= 0 ? "+" : ""}${status.boostDriftSeconds.toFixed(2)}s`}</strong></span>
       </div>
       <div className="diagnostic-log">{status.diagnostics.length ? status.diagnostics.slice(0, 24).map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span>{entry.message}</span></div>) : <span className="muted-text">No diagnostic events yet.</span>}</div>
       <button className="quiet-button danger" onClick={() => void run(() => command({ target: "background", type: "EMERGENCY_STOP" }))}>Emergency stop</button>

@@ -192,11 +192,18 @@ CI validates source compilation, parser tests, both production builds and the pa
 Auto Boost now keeps rechecking when the first Chopping OCR state is unknown instead of remaining idle. The first unknown boost crop immediately tries alternate calibrated crops. E dispatch brings the connected Bloxd target to the front and uses raw key-down input, which is better suited to game keyboard handlers. A **Test E ×2** diagnostic (available while Auto Boost is off) separates OCR/state-detection failures from keyboard-input failures.
 
 
-### v0.3.3 live refresh
+### v0.3.4 live refresh
 
 The extension side panel polls live state once per second. Counter OCR is due every 5 seconds by default, Chopping is re-read during actionable states, the visible cooldown decrements locally without OCRing every second, and the parsed full sidebar refreshes periodically while the panel is open. A floating Action Log mirrors the newest diagnostics, including each attempted E press.
 
 
-### v0.3.3 low-overhead mining mode
+### v0.3.4 low-overhead mining mode
 
 The side panel no longer runs a duplicate background counter OCR loop or periodic full-sidebar OCR while mining. Full sidebar snapshots are limited to connect, run start/end, and explicit refresh/recalibration. Live Blocks mined uses a tiny crop every 20 seconds by default (configurable 10–180 seconds), while Chopping OCR runs only around actionable state transitions and sleeps through known cooldowns. UI status polling reads cached state between OCR events.
+
+
+### v0.3.4 precision Chopping + Dumb mode
+
+Cooldown timing is anchored to screenshot capture time rather than OCR completion. A tiny Chopping-only crop re-synchronizes the displayed cooldown every 15 seconds by default, rejects implausible >6-second jumps, and enters a short precision window near Ready where counter OCR is deferred and Chopping is re-read rapidly. E only fires after a fresh Chopping Ready observation. The first post-E verification is accelerated, with one extra rapid Ready confirmation before the existing backup E ×3 burst. Rolling blocks/second is displayed to 6 significant figures and counter-rate timing uses screenshot capture timestamps.
+
+Dumb mode is a third connection mode. It forces auto connection, Auto Chopping, 15-second cooldown sync and live counter. After connection it arms from the current sidebar snapshot; while no run is active it takes a tiny counter sample about every two seconds. The first observed Blocks mined increase automatically starts an AFK run using the previous counter sample as the run boundary, avoiding a heavy full-panel OCR in the middle of mining. Runs are still stopped manually so the user controls the recording boundary.

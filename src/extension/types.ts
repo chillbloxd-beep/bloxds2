@@ -1,6 +1,6 @@
 import type { MiningSession, MiningType, SidebarSnapshot, SkillStateSnapshot } from "../types";
 
-export type ExtensionConnectionMode = "manual" | "auto";
+export type ExtensionConnectionMode = "manual" | "auto" | "dumb";
 export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
 
 export interface ExtensionSettings {
@@ -14,6 +14,8 @@ export interface ExtensionSettings {
   cooldownSafetySec: number;
   readyRetrySec: number;
   doubleTapGapMs: number;
+  cooldownSyncIntervalSec: number;
+  precisionWindowSec: number;
 }
 
 export interface DiagnosticEntry {
@@ -42,6 +44,10 @@ export interface LiveExtensionStatus {
   sessionStartedAt?: string;
   sessionStartBlocks?: number;
   boostFault?: string;
+  predictedReadyAt?: number;
+  lastBoostCaptureAt?: number;
+  boostDriftSeconds?: number;
+  dumbModeArmed?: boolean;
   settings: ExtensionSettings;
   currentSnapshot?: SidebarSnapshot;
   diagnostics: DiagnosticEntry[];
