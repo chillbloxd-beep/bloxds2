@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppSettings, Goal, MiningSession } from "./types";
 import { storage, exportPayload } from "./lib/storage";
-import { submitCommunityRun } from "./lib/api";
+import { deleteCommunityRun, submitCommunityRun } from "./lib/api";
 import { AppShell, type ViewName } from "./components/AppShell";
 import { Overview } from "./views/Overview";
 import { LogRun } from "./views/LogRun";
@@ -54,8 +54,13 @@ export default function App() {
   }
 
   async function deleteSession(id: string) {
-    setSessions(prev => prev.filter(s => s.id !== id));
+    const session = sessions.find(s => s.id === id);
+    if (!session) return;
+    if (session.communityOptIn && session.cloudStatus === "synced") {
+      await deleteCommunityRun(id);
+    }
     await storage.deleteSession(id);
+    setSessions(prev => prev.filter(s => s.id !== id));
   }
 
   async function saveGoal(goal: Goal) {
