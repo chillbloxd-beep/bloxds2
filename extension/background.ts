@@ -105,7 +105,7 @@ async function ensureOffscreen() {
   });
 }
 
-async function debuggerCommand<T = unknown>(method: string, params?: object): Promise<T> {
+async function debuggerCommand<T = unknown>(method: string, params?: { [key: string]: unknown }): Promise<T> {
   if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
   return await chrome.debugger.sendCommand({ tabId: connectedTabId }, method, params) as T;
 }
