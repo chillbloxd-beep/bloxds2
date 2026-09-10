@@ -43,6 +43,16 @@ export async function submitCommunityRun(session: MiningSession): Promise<void> 
   if (!res.ok) throw new Error(`Community sync failed (${res.status})`);
 }
 
+export async function deleteCommunityRun(id: string): Promise<void> {
+  const res = await fetch(api(`/api/community/runs/${encodeURIComponent(id)}`), {
+    method: "DELETE",
+    headers: {
+      "x-install-id": installId()
+    }
+  });
+  if (!res.ok) throw new Error(`Community withdrawal failed (${res.status})`);
+}
+
 export async function fetchCommunitySummary(filters: {
   game?: string;
   phase?: string;
