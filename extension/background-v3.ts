@@ -81,15 +81,6 @@ let precisionWindowActive = false;
 let dumbModeArmed = false;
 let dumbBaseline: { value: number; at: number } | undefined;
 let dumbArmSnapshot: SidebarSnapshot | undefined;
-let predictedReadyAt: number | undefined;
-let lastBoostCaptureAt: number | undefined;
-let boostDriftSeconds: number | undefined;
-let lastCooldownSyncAt = 0;
-let precisionTimer: number | undefined;
-let precisionWindowActive = false;
-let dumbModeArmed = false;
-let dumbBaseline: { value: number; at: number } | undefined;
-let dumbArmSnapshot: SidebarSnapshot | undefined;
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
