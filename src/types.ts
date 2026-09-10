@@ -65,7 +65,7 @@ export interface MiningSession {
   sidebarBefore?: SidebarSnapshot;
   sidebarAfter?: SidebarSnapshot;
   boostStats?: BoostRunStats;
-  extensionConnectionMode?: "manual" | "auto";
+  extensionConnectionMode?: "manual" | "auto" | "dumb";
   lobby?: string;
   communityOptIn: boolean;
   cloudStatus?: "local" | "synced" | "failed";

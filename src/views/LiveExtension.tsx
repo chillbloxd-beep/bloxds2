@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppSettings, MiningSession, MiningType, SkillStateSnapshot } from "../types";
 import type { BackgroundCommand, BackgroundResponse, ExtensionSettings, LiveExtensionStatus } from "../extension/types";
 import { Badge, Metric, PageHead, Section } from "../components/UI";
-import { formatDuration, formatInteger, formatRate } from "../lib/math";
+import { formatDuration, formatInteger } from "../lib/math";
 
 async function command<T = unknown>(message: BackgroundCommand): Promise<BackgroundResponse<T>> {
   const response = await chrome.runtime.sendMessage(message) as BackgroundResponse<T>;
@@ -106,7 +106,7 @@ export function LiveExtension({
   const settings = status?.settings;
   const connectionText = status?.connected
     ? `Connected${status.lobby ? ` · Lobby ${status.lobby}` : ""}`
-    : settings?.mode === "auto" ? "Waiting for One Block" : "Disconnected";
+    : settings?.mode === "auto" || settings?.mode === "dumb" ? "Waiting for One Block" : "Disconnected";
   const counterDelta = useMemo(() => {
     if (!status?.sessionActive || status.sessionStartBlocks === undefined || status.blocksMined === undefined) return undefined;
     return Math.max(0, status.blocksMined - status.sessionStartBlocks);
@@ -164,7 +164,7 @@ export function LiveExtension({
 
       <Section title="Chopping boost">
         <div className="boost-state"><Badge tone={skillTone(status.choppingSkill)}>{skillLabel(status.choppingSkill)}</Badge><span>{settings.autoBoost ? "Automation on" : "Automation off"}</span></div>
-        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×5 → wait 3s → verify. If still Ready, one backup E ×3 burst is sent. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} disabled={settings.mode === "dumb"} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
+        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×5 → fast verify. If Ready is confirmed twice, one backup E ×3 burst is sent. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} disabled={settings.mode === "dumb"} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
         <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} disabled={settings.mode === "dumb"} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
         <div className="mode-note"><strong>Watcher:</strong> {settings.autoBoost ? (status.boostFault ? "Paused by fault" : status.choppingSkill.state === "unknown" ? "Waiting for clear Chopping OCR; auto-rechecking" : `Armed · ${skillLabel(status.choppingSkill)}`) : "Off"}</div>
         <button className="quiet-button" disabled={busy || !status.connected || settings.autoBoost} onClick={() => void run(() => command({ target: "background", type: "TEST_E" }))}>Test E ×5</button>

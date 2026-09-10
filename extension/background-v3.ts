@@ -241,7 +241,10 @@ function applySnapshot(snapshot: SidebarSnapshot, sampleAt = Date.now()) {
   currentSnapshot = snapshot;
   lastFullReadAt = Date.now();
   if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined, sampleAt);
-  if (snapshot.chopping?.skill) setChoppingSkill(snapshot.chopping.skill);
+  if (snapshot.chopping?.skill) {
+    lastBoostCaptureAt = sampleAt;
+    applyBoostObservation(snapshot.chopping.skill, sampleAt);
+  }
 }
 
 async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapshot> {
@@ -972,10 +975,10 @@ async function startSession(miningType: "active" | "afk", preset?: { snapshot: S
 }
 
 function armDumbMode() {
-  if (settings.mode !== "dumb" || activeSession || connectedTabId === undefined) return;
+  if (settings.mode !== "dumb" || activeSession || connectedTabId === undefined || dumbModeArmed) return;
   const counter = lastCounter?.value ?? currentSnapshot?.blocksMined;
   if (counter === undefined) return;
-  dumbArmSnapshot = currentSnapshot ? { ...currentSnapshot, blocksMined: counter } : { blocksMined: counter };
+  dumbArmSnapshot = currentSnapshot ? { ...currentSnapshot, blocksMined: counter } : { capturedAt: new Date().toISOString(), rawText: "", lines: [], blocksMined: counter };
   dumbBaseline = { value: counter, at: lastCounter?.at || Date.now() };
   dumbModeArmed = true;
   log(`Dumb mode armed at ${counter.toLocaleString()} blocks. Start mining and an AFK run will begin automatically.`);
@@ -989,7 +992,8 @@ async function dumbModeCounterTick() {
   const current = lastCounter;
   if (value === undefined || !current) return true;
   if (value > previous.value) {
-    const startSnapshot: SidebarSnapshot = { ...(dumbArmSnapshot || currentSnapshot || {}), blocksMined: previous.value };
+    const baseSnapshot: SidebarSnapshot = dumbArmSnapshot || currentSnapshot || { capturedAt: new Date(previous.at).toISOString(), rawText: "", lines: [] };
+    const startSnapshot: SidebarSnapshot = { ...baseSnapshot, blocksMined: previous.value };
     dumbModeArmed = false;
     dumbBaseline = undefined;
     log(`Dumb mode detected mining (${previous.value.toLocaleString()} → ${value.toLocaleString()}). Auto-starting AFK run from the previous counter sample.`);
@@ -1223,6 +1227,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== BOOST_WAKE) return;
   boostWakeAt = undefined;
+  if (precisionWindowActive) {
+    log("Cooldown wake alarm fired while precision watcher is already active; duplicate OCR skipped.");
+    return;
+  }
   log("Cooldown wake alarm fired; checking Chopping state now.");
   void ensureLoaded().then(wakeBoost);
 });
