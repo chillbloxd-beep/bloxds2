@@ -85,7 +85,7 @@ export function LiveExtension({
     await onSave({
       ...response.session,
       communityOptIn: appSettings.defaultCommunityOptIn,
-      cloudStatus: appSettings.defaultCommunityOptIn ? "local" : "local"
+      cloudStatus: "local"
     });
     await refresh();
   }
@@ -155,7 +155,8 @@ export function LiveExtension({
       </Section>
     </div>
 
-    <Section title="Current sidebar read" action={<button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "REFRESH_FULL" }))}>Refresh full panel</button>}>
+    <Section title="Current sidebar read">
+      <div className="section-inline-action"><button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "REFRESH_FULL" }))}>Refresh full panel</button></div>
       <div className="sidebar-read-grid">
         <div><span>Banner</span><strong>{snapshot?.banner || "—"}</strong></div>
         <div><span>Owner</span><strong>{snapshot?.owner || "—"}</strong></div>
