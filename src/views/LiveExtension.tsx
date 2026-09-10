@@ -29,6 +29,12 @@ function formatRate6(value?: number) {
   return value.toPrecision(6);
 }
 
+function formatRate6(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  if (value === 0) return "0.00000";
+  return value.toPrecision(6);
+}
+
 function elapsed(startedAt?: string) {
   if (!startedAt) return "—";
   return formatDuration(Math.max(0, Date.now() - new Date(startedAt).getTime()), true);
@@ -195,6 +201,8 @@ export function LiveExtension({
         <label className="field"><span>E burst gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
         <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
+        <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
+        <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
       </div>
       <p className="microcopy">Precision low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. Chopping uses only its tiny crop every 15s by default to re-sync the real countdown. Near predicted Ready it enters a short precision window, pauses counter OCR, and checks Chopping rapidly until the current game UI actually says Ready. E is never triggered by the local timer alone.</p>
     </Section>
@@ -211,6 +219,8 @@ export function LiveExtension({
         <span>Reads/min <strong>{status.readsLastMinute}</strong></span>
         <span>Crop <strong>{status.ocrProfile || "un-calibrated"}</strong></span>
         <span>Viewport <strong>{status.viewportWidth && status.viewportHeight ? `${Math.round(status.viewportWidth)}×${Math.round(status.viewportHeight)}` : "—"}</strong></span>
+        <span>Ready prediction <strong>{status.predictedReadyAt ? `${Math.max(0, (status.predictedReadyAt - Date.now()) / 1000).toFixed(2)}s` : "—"}</strong></span>
+        <span>Cooldown drift <strong>{status.boostDriftSeconds === undefined ? "—" : `${status.boostDriftSeconds >= 0 ? "+" : ""}${status.boostDriftSeconds.toFixed(2)}s`}</strong></span>
         <span>Ready prediction <strong>{status.predictedReadyAt ? `${Math.max(0, (status.predictedReadyAt - Date.now()) / 1000).toFixed(2)}s` : "—"}</strong></span>
         <span>Cooldown drift <strong>{status.boostDriftSeconds === undefined ? "—" : `${status.boostDriftSeconds >= 0 ? "+" : ""}${status.boostDriftSeconds.toFixed(2)}s`}</strong></span>
       </div>

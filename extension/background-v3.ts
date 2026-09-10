@@ -81,6 +81,15 @@ let precisionWindowActive = false;
 let dumbModeArmed = false;
 let dumbBaseline: { value: number; at: number } | undefined;
 let dumbArmSnapshot: SidebarSnapshot | undefined;
+let predictedReadyAt: number | undefined;
+let lastBoostCaptureAt: number | undefined;
+let boostDriftSeconds: number | undefined;
+let lastCooldownSyncAt = 0;
+let precisionTimer: number | undefined;
+let precisionWindowActive = false;
+let dumbModeArmed = false;
+let dumbBaseline: { value: number; at: number } | undefined;
+let dumbArmSnapshot: SidebarSnapshot | undefined;
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -447,6 +456,8 @@ function scheduleCounter() {
   // panel is closed, no live counter OCR runs; start/end snapshots remain exact.
   clearTimer(counterTimer);
   counterTimer = undefined;
+  precisionTimer = undefined;
+  precisionWindowActive = false;
 }
 
 async function keyE() {
@@ -859,6 +870,7 @@ async function doConnect(tabId: number) {
   scheduleCounter();
   await maybeArmBoostFromSnapshot();
   if (settings.mode === "dumb") armDumbMode();
+  if (settings.mode === "dumb") armDumbMode();
 }
 
 async function connectTab(tabId: number) {
@@ -1185,6 +1197,8 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         return { ok: true, status: status() };
       case "EMERGENCY_STOP":
         settings = { ...settings, mode: "manual", manualEnabled: false, autoBoost: false };
+        precisionWindowActive = false;
+        dumbModeArmed = false;
         precisionWindowActive = false;
         dumbModeArmed = false;
         await saveSettings();
