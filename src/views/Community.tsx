@@ -31,6 +31,7 @@ export function Community({sessions}:{sessions:MiningSession[]}) {
     {state==="error" && <div className="callout"><strong>Community cloud is not connected in this build environment.</strong><p>Personal/local features still work. Deploy the included Cloudflare Worker + D1 migration to activate shared averages.</p></div>}
     {state==="loading" && <div className="loading-line">Loading community aggregate…</div>}
     {state==="ready" && data && <>
+      {data.sampleCapped && <div className="callout warn"><strong>Large cohort sampled.</strong><p>This view uses the latest {formatInteger(data.sampleLimit)} eligible runs for this filter. Precomputed all-time aggregates should replace this live query once the dataset grows beyond that size.</p></div>}
       <div className="community-headline">
         <div><span>COMBINED THROUGHPUT</span><strong>{formatRate(data.combinedThroughput)}</strong><b>blocks / second</b></div>
         <div className="community-sample"><span>{formatInteger(data.runs)} runs</span><span>{formatInteger(data.players)} contributors</span><span>{formatInteger(data.totalBlocks)} blocks</span></div>
@@ -61,6 +62,6 @@ export function Community({sessions}:{sessions:MiningSession[]}) {
         </Section>
       </div>
     </>}
-    <div className="privacy-note">Your local runs: {sessions.length}. Community statistics only use runs explicitly submitted with community opt-in.</div>
+    <div className="privacy-note">Your local runs: {sessions.length}. Community statistics only use runs explicitly submitted with community opt-in. Synced runs can be withdrawn by deleting them from Sessions.</div>
   </>;
 }
