@@ -112,6 +112,27 @@ export function isStaleObservation(
     || stamp.captureAt < lastAcceptedCaptureAt;
 }
 
+export interface CooldownSample {
+  seconds: number;
+  captureAt: number;
+}
+
+export function cooldownReadyEstimateMs(sample: CooldownSample): number {
+  return sample.captureAt + sample.seconds * 1000;
+}
+
+/** Two countdown reads are considered mutually consistent when they predict
+ * essentially the same Ready boundary. This is deliberately based on the
+ * absolute boundary instead of raw displayed seconds, because time elapses
+ * between captures. */
+export function cooldownSamplesAgree(
+  first: CooldownSample,
+  second: CooldownSample,
+  toleranceMs = 2_200
+): boolean {
+  return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) <= toleranceMs;
+}
+
 export type TransitionVerdict = "accept" | "confirm";
 
 /**
@@ -174,20 +195,29 @@ export function cooldownSyncDelayMs(options: {
 }
 
 /**
- * Precision probing avoids repeatedly invoking Tesseract. While the predicted
- * transition is still more than 150 ms away and a learned micro-crop exists,
- * use the cheap template path only. At the transition boundary, allow one
- * authoritative Tesseract fallback and then back off before trying again.
+ * Precision probing avoids repeatedly invoking Tesseract. Fast-only probing is
+ * legal only when the micro crop exists *and* both learned Ready/Active
+ * templates are available. Otherwise a fast-only request would be a guaranteed
+ * miss and would add latency without adding information.
  */
 export function precisionProbePlan(options: {
   remainingMs: number;
   hasMicroCrop: boolean;
+  fastRecognizerReady: boolean;
 }): { fastOnly: boolean; nextDelayMs: number } {
   const remainingMs = options.remainingMs;
-  const fastOnly = options.hasMicroCrop && remainingMs > 150;
+  const fastOnly = options.hasMicroCrop && options.fastRecognizerReady && remainingMs > -250;
   let nextDelayMs: number;
-  if (remainingMs > 1_000) nextDelayMs = 500;
-  else if (remainingMs > 150) nextDelayMs = 250;
-  else nextDelayMs = 700;
+
+  if (fastOnly) {
+    if (remainingMs > 1_500) nextDelayMs = 350;
+    else if (remainingMs > 300) nextDelayMs = 150;
+    else nextDelayMs = 120;
+  } else {
+    // Without a trained matcher, avoid hammering Tesseract sub-second. One
+    // authoritative micro read per ~0.7s near the boundary is enough to train
+    // or confirm state while keeping renderer disturbance bounded.
+    nextDelayMs = remainingMs > 1_000 ? 900 : 700;
+  }
   return { fastOnly, nextDelayMs };
 }
