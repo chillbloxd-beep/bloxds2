@@ -1,4 +1,5 @@
 import type { MiningSession, MiningType, SidebarSnapshot, SkillStateSnapshot } from "../types";
+import type { RelativeOcrRect } from "./ocrCalibration";
 
 export type ExtensionConnectionMode = "manual" | "auto" | "dumb";
 export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
@@ -48,6 +49,10 @@ export interface LiveExtensionStatus {
   lastBoostCaptureAt?: number;
   boostDriftSeconds?: number;
   dumbModeArmed?: boolean;
+  ocrQueueDepth?: number;
+  fastBoostHits?: number;
+  boostMicroCalibrated?: boolean;
+  counterMicroCalibrated?: boolean;
   settings: ExtensionSettings;
   currentSnapshot?: SidebarSnapshot;
   diagnostics: DiagnosticEntry[];
@@ -90,12 +95,17 @@ export interface BackgroundResponse<T = unknown> {
 }
 
 export type OcrMode = "full" | "counter" | "boost";
+export type OcrInputScope = "base" | "micro";
+export type OcrRecognitionMethod = "fast-template" | "tesseract-base" | "tesseract-micro";
 
 export interface OcrRequest {
   target: "offscreen";
   type: "OCR";
   mode: OcrMode;
   imageDataUrl: string;
+  calibrationKey?: string;
+  inputScope?: OcrInputScope;
+  preferFast?: boolean;
 }
 
 export interface OcrResponse {
@@ -106,5 +116,8 @@ export interface OcrResponse {
   snapshot?: SidebarSnapshot;
   blocksMined?: number;
   choppingSkill?: SkillStateSnapshot;
+  microRect?: RelativeOcrRect;
+  recognitionMethod?: OcrRecognitionMethod;
+  fastMatchedLabel?: "ready" | "active";
   error?: string;
 }
