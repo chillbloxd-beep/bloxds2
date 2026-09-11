@@ -7,12 +7,13 @@ import {
   type RelativeOcrRect
 } from "./ocrCalibration";
 import { parseBlocksMined, parseChoppingFromText, parseSidebarText, parseSkillState } from "./parser";
-import type { OcrMode, OcrRequest, OcrResponse } from "./types";
+import type { OcrMode, OcrRequest, OcrResponse, OffscreenControlRequest, OffscreenWakeId } from "./types";
 
 let workerPromise: Promise<Worker> | null = null;
 let calibrationKey = "";
 let readyTemplates: number[][] = [];
 let activeTemplates: number[][] = [];
+const wakeTimers = new Map<OffscreenWakeId, number>();
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -291,7 +292,40 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
   }
 }
 
+function cancelWake(id: OffscreenWakeId) {
+  const handle = wakeTimers.get(id);
+  if (handle !== undefined) window.clearTimeout(handle);
+  wakeTimers.delete(id);
+}
+
+function scheduleWake(id: OffscreenWakeId, when: number) {
+  cancelWake(id);
+  const delayMs = Math.max(0, when - Date.now());
+  const handle = window.setTimeout(() => {
+    wakeTimers.delete(id);
+    void chrome.runtime.sendMessage({ target: "background", type: "OFFSCREEN_WAKE", id });
+  }, Math.min(delayMs, 2_147_000_000));
+  wakeTimers.set(id, handle);
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  const control = message as OffscreenControlRequest;
+  if (control?.target === "offscreen" && control.type === "SCHEDULE_WAKE") {
+    scheduleWake(control.id, control.when);
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (control?.target === "offscreen" && control.type === "CANCEL_WAKE") {
+    cancelWake(control.id);
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (control?.target === "offscreen" && control.type === "RESET_CALIBRATION") {
+    resetCalibration();
+    sendResponse({ ok: true });
+    return false;
+  }
+
   const request = message as OcrRequest;
   if (request?.target !== "offscreen" || request.type !== "OCR") return undefined;
 
