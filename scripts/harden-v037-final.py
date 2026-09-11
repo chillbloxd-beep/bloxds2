@@ -45,7 +45,7 @@ write(path, text)
 path = "scripts/audit-extension.mjs"
 text = read(path)
 anchor = '''expect(!boundaryBlock.includes("captureOcr("), "boundary input window performs screenshot/OCR capture");\n'''
-extra = '''expect(!boundaryBlock.includes('event: "input.boundary_e"'), "boundary loop still logs/broadcasts every E dispatch");\nexpect(boundaryBlock.includes("dispatchOffsets"), "boundary loop does not retain dispatch timing for one post-window summary");\nexpect(background.includes('event: "boundary.rapid_ready_confirm"'), "unexpected early Ready does not get the 100ms final-lock confirmation path");\nexpect((background.match(/if \\(boostMisses < 2\\)/g) || []).length >= 2, "ordinary Chopping misses are not staged before both same-profile and multi-profile recovery");\n'''
+extra = '''expect(!boundaryBlock.includes('event: "input.boundary_e"'), "boundary loop still logs/broadcasts every E dispatch");\nexpect(boundaryBlock.includes("dispatchOffsets"), "boundary loop does not retain dispatch timing for one post-window summary");\nexpect(background.includes('event: "boundary.rapid_ready_confirm"'), "unexpected early Ready does not get the 100ms final-lock confirmation path");\nexpect(background.includes("if (!critical && boostMisses < 2)") && background.includes("if (boostMisses < 2)"), "ordinary Chopping misses are not staged before both same-profile and multi-profile recovery");\n'''
 text = replace_once(text, anchor, anchor + extra, "final hardening audit")
 write(path, text)
 
