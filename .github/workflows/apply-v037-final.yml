@@ -28,20 +28,18 @@ jobs:
           from pathlib import Path
           p = Path('scripts/apply-v037-final.py')
           text = p.read_text()
-          patches = [
-              (
-                  'return cooldownSamplesAgree(first, second, FINAL_LOCK_AGREEMENT_MS);',
-                  'return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;'
-              ),
-              (
-                  'expect(background.includes("precisionWindowActive || nearReady"), "counter is not pre-deferred just before the precision window");',
-                  'expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter is not pre-deferred across the final lock/input/verification window");'
-              )
-          ]
-          for old, new in patches:
-              if text.count(old) != 1:
-                  raise SystemExit(f'expected one migration patch target, found {text.count(old)}: {old}')
-              text = text.replace(old, new, 1)
+
+          old = 'return cooldownSamplesAgree(first, second, FINAL_LOCK_AGREEMENT_MS);'
+          new = 'return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one final-lock helper target, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          anchor = 'text = replace_once(text, old_audit, new_audit, "v0.3.7 audit invariants")'
+          insertion = anchor + '\ntext = text.replace(\'expect(background.includes("precisionWindowActive || nearReady"), "counter is not pre-deferred just before the precision window");\', \'expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter is not pre-deferred across the final lock/input/verification window");\')'
+          if text.count(anchor) != 1:
+              raise SystemExit(f'expected one audit insertion anchor, found {text.count(anchor)}')
+          text = text.replace(anchor, insertion, 1)
           p.write_text(text)
           PY
       - name: Apply deterministic migration
