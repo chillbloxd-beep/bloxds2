@@ -31,7 +31,7 @@ Lobby IDs are never hard-coded. URL detection is based on `/play/oneBlock`.
 
 The extension uses Chrome DevTools Protocol screenshot clipping to capture only small regions of the right-hand One Block panel. The images are transient and processed locally with bundled Tesseract.js/WebAssembly assets. It does not upload screenshots or record video.
 
-A full sidebar read is used at connection, manual refresh, run start and run end. If the first connection snapshot misses Phase, v0.3.6 performs one connection-time metadata retry; it does not reintroduce periodic full-sidebar OCR. Raw recognized text is retained locally for run snapshots, so information that is visible but not yet parsed is not silently discarded.
+A full sidebar read is used at connection, manual refresh, run start and run end. If the first connection snapshot misses Phase, v0.3.7 performs one connection-time metadata retry; it does not reintroduce periodic full-sidebar OCR. Raw recognized text is retained locally for run snapshots, so information that is visible but not yet parsed is not silently discarded.
 
 The parser currently extracts, when OCR can read them:
 
@@ -54,19 +54,19 @@ Extension-recorded runs store exact start/end timestamps, start/end `Blocks mine
 
 The Sessions page exposes the raw before/after sidebar snapshots under **Details**. Raw sidebar snapshots are local-only and are not included in anonymous community submissions.
 
-### Chopping automation and v0.3.6 reliability fixes
+### Chopping automation and v0.3.7 reliability fixes
 
-The automation targets **Chopping** specifically. A local countdown never authorizes input by itself: only a fresh Chopping `Ready` observation can start the E sequence. The primary activation remains E ×5, followed by verification. If `Ready` is still observed, one additional confirmation is required before the single backup E ×3 burst. Unclear observations fail closed and send no key.
+The automation targets **Chopping** specifically. v0.3.7 has two guarded activation paths. For a trusted cooldown, two final countdown reads must predict the same Ready boundary within the strict lock tolerance before scheduled input is armed; OCR and counter work are then blacked out while six E presses span ±1 second around that modeled boundary. If the strict timing lock cannot be established, the extension falls back to fresh actual-`Ready` confirmation and the existing E ×5 path. After either path, activation is verified and only one backup E ×3 burst is allowed. Unclear or untrusted timing never arms the scheduled boundary path.
 
-v0.3.6 is a fix-only release based on failures seen in the v0.3.5 live browser recording. The first numeric cooldown after Active is now provisional and must agree with a second fresh sample before it becomes the trusted Ready prediction. If an established timer later disagrees by more than the normal drift tolerance, one outlier cannot move it, but two fresh outliers that agree with each other can replace the stale prediction. This prevents one bad first OCR value from locking the watcher onto the wrong countdown for an entire cycle.
+v0.3.7 is a fix-only release based on failures seen in the v0.3.5 live browser recording. The first numeric cooldown after Active is now provisional and must agree with a second fresh sample before it becomes the trusted Ready prediction. If an established timer later disagrees by more than the normal drift tolerance, one outlier cannot move it, but two fresh outliers that agree with each other can replace the stale prediction. This prevents one bad first OCR value from locking the watcher onto the wrong countdown for an entire cycle.
 
-An unexpectedly early real `Ready` still requires confirmation, but the confirmation is scheduled immediately instead of falling back to the normal cooldown cadence. The precision watcher starts slightly ahead of the integer countdown boundary, and once precision owns the transition it cancels the normal cooldown-sync wake so two reads do not collide at the same boundary.
+An unexpectedly early real `Ready` still gets a rapid second confirmation and, once confirmed, bypasses the timer lock and activates immediately. On the normal trusted path, the final lock starts several seconds before predicted Ready, cancels ordinary cooldown/counter work, takes two authoritative countdown samples, and then sleeps through the transition except for the scheduled E events.
 
-The learned Ready/Active fast path is used in fast-only mode only after Tesseract has confirmed at least one template for **both** states. Until then, precision uses bounded authoritative reads instead of issuing guaranteed fast-template misses. Chopping calibration now keeps a fixed, right-anchored Skill value cell across different token widths such as `149s`, `Ready` and `Active`.
+The learned Ready/Active matcher remains a guarded accelerator for state-confirmation fallback and verification; it is not required for the trusted scheduled boundary path. Chopping calibration is anchored to the stable `Skill:` label rather than the changing `149s` / `Ready` / `Active` token, so the recurring value crop does not move with text width.
 
 To reduce the renderer disturbance seen in the v0.3.5 recording, one ordinary micro-crop miss no longer immediately launches broad multi-profile recovery. Recovery is staged, while timing-critical precision reads are bounded to the active profile. Full-sidebar OCR is never run periodically while mining.
 
-E dispatch still uses Chrome DevTools Protocol, but v0.3.6 holds each E key-down for 25 ms before key-up rather than issuing an effectively immediate down/up pair. The existing E ×5 / one E ×3 backup safety limits remain unchanged.
+E dispatch still uses Chrome DevTools Protocol, but v0.3.7 holds each E key-down for 25 ms before key-up rather than issuing an effectively immediate down/up pair. The existing E ×5 / one E ×3 backup safety limits remain unchanged.
 
 ### Counter, sessions and Dumb mode
 
@@ -83,10 +83,10 @@ Mini mode shows Chopping state, Blocks mined, rolling speed, run progress and he
 ### Performance behavior
 
 - full sidebar OCR: connect/calibration, explicit refresh/recalibration, run start and run end only
-- Chopping cooldown: sleep between scheduled tiny reads; nominal 15-second sync in Dumb mode
+- Chopping cooldown: sleep between scheduled tiny reads; the final trusted boundary uses a scheduled six-tap E window with OCR/counter blackout; nominal 15-second sync in Dumb mode
 - first cooldown anchor: two fresh time-consistent samples before trust
 - large timer disagreement: recovery quorum rather than permanent old-prediction lock-in
-- precision window: begins before integer zero, counter paused, normal sync wake cancelled, learned matching preferred
+- final timing lock: begins several seconds before predicted Ready; two strict countdown reads must agree, then OCR/counter stays blacked out across the six-tap boundary window
 - micro-crop recovery: one ordinary miss is deferred; broad profile recovery is staged rather than immediate
 - live counter: small crop, default 20 seconds while a run is active
 - UI: side panel and optional monitor display cached/event-driven state; `GET_STATUS` does not itself trigger OCR or connection recovery
@@ -170,6 +170,6 @@ The current community endpoint analyzes up to the latest 10,000 eligible runs fo
 
 CI validates source compilation, deterministic parser/reliability/calibration tests, production builds, the extension audit and packaged OCR assets. It cannot prove the exact rendered Ready→E delay, actual mining/FPS impact, or live OCR accuracy on a particular Chromebook/display scale.
 
-### v0.3.6 fix release
+### v0.3.7 fix release
 
-v0.3.6 does not add a new user-facing feature set. It targets the v0.3.5 live-test failures: bad first cooldown anchoring, stale-prediction lock-in, delayed early-Ready confirmation, integer-boundary latency, untrained fast-only probing, unstable Chopping micro-crops, overly eager broad fallback, occasional ineffective ultra-short E dispatch, and missing Phase retry at connection. These fixes must still pass a new real Bloxd/Chromebook acceptance recording before their real-world latency and performance impact can be called proven.
+v0.3.7 does not add a new user-facing feature set. It keeps the v0.3.6 cooldown-recovery safeguards and concentrates on the remaining live-test problems: delayed Ready→Active transition, OCR work at the exact boundary, unstable Chopping value crops, renderer disturbance from eager fallback, and input-scheduling headroom. The trusted path now uses a strict two-read final timer lock plus a six-tap scheduled boundary window; unsafe timing falls back to fresh Ready confirmation. These fixes must still pass a new real Bloxd/Chromebook acceptance recording before a ≤500 ms Ready→Active result or mining-performance impact can be called proven.

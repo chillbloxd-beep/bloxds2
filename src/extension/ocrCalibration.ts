@@ -76,32 +76,29 @@ function normalizedRect(
 }
 
 /**
- * Chopping's value is right-aligned in the Skill cell. Centering a micro crop
- * on the currently recognized token made the crop move when `149s`, `Ready`
- * and `Active` had different widths. Keep a wider, right-anchored cell instead
- * so one calibration remains valid through the whole state cycle.
+ * Chopping's changing value (`Ready`, `Active`, `153s`, ...) is not a stable
+ * calibration anchor. The literal `Skill:` label immediately to its left is.
+ * Anchor the recurring micro-crop to that fixed word and capture only the value
+ * cell to its right. This keeps geometry stable across the whole cooldown cycle
+ * and gives the single-word OCR path more vertical breathing room.
  */
-function normalizedStateCellRect(
-  word: HocrWord,
+function normalizedSkillValueRect(
+  skillAnchor: HocrWord,
   imageWidth: number,
   imageHeight: number
 ): RelativeOcrRect | undefined {
   if (imageWidth <= 0 || imageHeight <= 0) return undefined;
-  const wordHeight = word.y1 - word.y0;
-  // Fixed cell dimensions are intentional: centering width on the token itself
-  // made Ready/Active/149s produce different rectangles. The Skill value cell
-  // is right-aligned, so its capture geometry must not depend on token width.
-  const targetWidth = Math.min(imageWidth, imageWidth * 0.42);
-  const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.22, wordHeight * 2.4));
-  const right = Math.min(imageWidth, word.x1 + wordHeight * 1.4);
-  const left = Math.max(0, Math.min(imageWidth - targetWidth, right - targetWidth));
-  const centerY = (word.y0 + word.y1) / 2;
+  const wordHeight = Math.max(1, skillAnchor.y1 - skillAnchor.y0);
+  const left = Math.max(0, Math.min(imageWidth - 1, skillAnchor.x1 + wordHeight * 0.12));
+  const targetWidth = Math.min(imageWidth - left, imageWidth * 0.34);
+  const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.28, wordHeight * 2.8));
+  const centerY = (skillAnchor.y0 + skillAnchor.y1) / 2;
   const top = Math.max(0, Math.min(imageHeight - targetHeight, centerY - targetHeight / 2));
   return {
     x: left / imageWidth,
     y: top / imageHeight,
-    width: Math.min(imageWidth - left, targetWidth) / imageWidth,
-    height: Math.min(imageHeight - top, targetHeight) / imageHeight
+    width: targetWidth / imageWidth,
+    height: targetHeight / imageHeight
   };
 }
 
@@ -109,9 +106,8 @@ function resemblesChopping(value: string) {
   return /^ch[o0]pp(?:ing|lng)$/i.test(value.replace(/[^a-z0-9]/gi, ""));
 }
 
-function resemblesState(value: string) {
-  const compact = value.replace(/\s+/g, "");
-  return /^(ready|active)$/i.test(compact) || /^[0-9IlOo|]{1,5}s$/i.test(compact);
+function resemblesSkillAnchor(value: string) {
+  return /^skill[:=]?$/i.test(value.replace(/\s+/g, ""));
 }
 
 export function findBoostStateRect(
@@ -123,8 +119,8 @@ export function findBoostStateRect(
   if (!chopping) return undefined;
   const choppingCenterY = (chopping.y0 + chopping.y1) / 2;
   const lineHeight = Math.max(1, chopping.y1 - chopping.y0);
-  const candidates = words
-    .filter(word => resemblesState(word.text))
+  const anchors = words
+    .filter(word => resemblesSkillAnchor(word.text))
     .filter(word => {
       const centerY = (word.y0 + word.y1) / 2;
       return centerY >= choppingCenterY - lineHeight * 0.35
@@ -135,9 +131,9 @@ export function findBoostStateRect(
       const by = Math.max(0, (b.y0 + b.y1) / 2 - choppingCenterY);
       return ay - by || b.x0 - a.x0;
     });
-  const state = candidates[0];
-  if (!state) return undefined;
-  return normalizedStateCellRect(state, imageWidth, imageHeight);
+  const skillAnchor = anchors[0];
+  if (!skillAnchor) return undefined;
+  return normalizedSkillValueRect(skillAnchor, imageWidth, imageHeight);
 }
 
 function numericTokenScore(value: string) {

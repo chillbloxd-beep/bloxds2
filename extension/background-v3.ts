@@ -2,7 +2,7 @@ import type { MiningSession, SidebarSnapshot, SkillStateSnapshot } from "../src/
 import { cropRegion, isUsableSnapshot, profileOrder, snapshotScore, type OcrViewport } from "../src/extension/crop";
 import { isOneBlockUrl, lobbyFromUrl } from "../src/extension/parser";
 import type { RelativeOcrRect } from "../src/extension/ocrCalibration";
-import { OcrDeadlineError, PriorityOcrQueue, cooldownReadyEstimateMs, cooldownSamplesAgree, cooldownSyncDelayMs, isStaleObservation, precisionProbePlan, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
+import { BOUNDARY_E_OFFSETS_MS, BOUNDARY_WAKE_LEAD_MS, OcrDeadlineError, PriorityOcrQueue, cooldownReadyEstimateMs, cooldownSamplesAgree, cooldownSyncDelayMs, finalLockSamplesAgree, isStaleObservation, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
 import type {
   ActiveExtensionSession,
   BackgroundCommand,
@@ -104,6 +104,11 @@ let lastBoostCaptureAt: number | undefined;
 let boostDriftSeconds: number | undefined;
 let lastCooldownSyncAt = 0;
 let precisionWindowActive = false;
+let finalLockSample: { seconds: number; captureAt: number } | undefined;
+let finalLockAttempts = 0;
+let finalLockConfirmed = false;
+let boundaryBurstRunning = false;
+let boundaryWakeAt: number | undefined;
 let dumbModeArmed = false;
 let dumbBaseline: { value: number; at: number } | undefined;
 let dumbArmSnapshot: SidebarSnapshot | undefined;
@@ -257,7 +262,7 @@ async function cancelOffscreenWake(id: OffscreenWakeId) {
 }
 
 function cancelAllBoostWakes() {
-  for (const id of ["boost-sync", "boost-precision", "boost-verify", "boost-active"] as OffscreenWakeId[]) {
+  for (const id of ["boost-sync", "boost-precision", "boost-boundary", "boost-verify", "boost-active"] as OffscreenWakeId[]) {
     void cancelOffscreenWake(id);
   }
 }
@@ -424,9 +429,6 @@ function setChoppingSkill(skill: SkillStateSnapshot) {
   const next = skillText(skill);
   choppingSkill = skill;
   lastBoostReadAt = Date.now();
-  if (currentSnapshot) {
-    currentSnapshot.chopping = { ...(currentSnapshot.chopping || {}), skill };
-  }
   if (skill.state === "ready" || skill.state === "active") {
     boostCooldownReadyAt = undefined;
     boostWakeAt = undefined;
@@ -630,7 +632,7 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
       // every miss and the live clip showed visible renderer stalls around
       // fallback activity. Keep the crop for one later sync; critical reads may
       // still use one same-profile base fallback immediately.
-      if (!critical && boostMisses < 1) {
+      if (!critical && boostMisses < 2) {
         log("Chopping micro-crop was unclear once; keeping calibration and deferring broad fallback.", "debug", {
           category: "ocr", event: "micro.miss_deferred"
         });
@@ -698,9 +700,9 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
     if (skill.state !== "unknown") return skill;
     if (options.fastOnly || options.noProfileFallback) return skill;
 
-    if (boostMisses < 1) {
+    if (boostMisses < 2) {
       boostMisses += 1;
-      log("Chopping OCR missed the active crop once; deferring multi-profile recovery to avoid a transient renderer spike.", "debug", {
+      log(`Chopping OCR miss ${boostMisses}/2 on the active profile; deferring multi-profile recovery to avoid a renderer spike.`, "debug", {
         category: "ocr", event: "boost.profile_recovery_deferred"
       });
       return skill;
@@ -872,10 +874,20 @@ function updateCounter(value: number, sampleAt = Date.now()): boolean {
   return true;
 }
 
+function resetBoundaryState() {
+  finalLockSample = undefined;
+  finalLockAttempts = 0;
+  finalLockConfirmed = false;
+  boundaryBurstRunning = false;
+  boundaryWakeAt = undefined;
+  void cancelOffscreenWake("boost-boundary");
+}
+
 function clearShortTimers() {
   precisionWindowActive = false;
   quickTransitionConfirm = false;
   pendingTransitionConfirm = undefined;
+  resetBoundaryState();
   cancelAllBoostWakes();
 }
 
@@ -910,8 +922,8 @@ function scheduleCounter(delayMs?: number) {
 async function counterWake() {
   if (connectedTabId === undefined) return;
   const nearReady = settings.autoBoost && predictedReadyAt !== undefined
-    && predictedReadyAt - Date.now() <= settings.precisionWindowSec * 1000 + 2_000;
-  if (precisionWindowActive || nearReady) {
+    && predictedReadyAt - Date.now() <= Math.max(9_000, (settings.precisionWindowSec + 3) * 1000);
+  if (precisionWindowActive || boundaryBurstRunning || Boolean(boostCycle) || nearReady) {
     log("Blocks counter wake deferred because Chopping is near or inside the precision Ready window.", "debug", {
       category: "counter", event: "counter.deferred", details: { precisionWindowActive, nearReady }
     });
@@ -960,8 +972,7 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function pressEBurst(count: number, label: string) {
-  log(`${label}: attempting E ×${count}.`);
+async function focusGameSurface(label: string) {
   await debuggerCommand("Page.bringToFront");
   try {
     await debuggerCommand("Runtime.evaluate", {
@@ -972,7 +983,12 @@ async function pressEBurst(count: number, label: string) {
   } catch (error) {
     log(`${label}: focus helper failed (${errorText(error)}); continuing with page focus.`, "warn");
   }
-  await delay(80);
+  await delay(50);
+}
+
+async function pressEBurst(count: number, label: string) {
+  log(`${label}: attempting E ×${count}.`);
+  await focusGameSurface(label);
   for (let i = 1; i <= count; i += 1) {
     log(`${label}: pressing E ${i}/${count}…`, "debug", { category: "input", event: "input.e.pending", details: { burst: label, index: i, count } });
     const dispatchStartedAt = Date.now();
@@ -998,6 +1014,7 @@ function confirmBoostSuccess() {
     if (boostCycle?.retryUsed) boostTotals.backupSuccessfulActivations += 1;
     else boostTotals.firstTryActivations += 1;
     if (boostCycle) boostCycle.confirmed = true;
+    scheduleCounter(1_000);
     queueUiBroadcast();
   }
 }
@@ -1017,11 +1034,11 @@ function scheduleCooldownMonitoring() {
     category: "timer", event: "sleep.enter", details: { sleepMs: syncDelayMs, remainingMs, uncertaintySec: cooldownUncertaintySec }
   });
   void scheduleOffscreenWake("boost-sync", nextCooldownSyncAt);
-  // Bloxd displays whole seconds, so a visible `2s` is an interval rather than
-  // an exact 2.000-second boundary. Start the cheap watcher 1.5s early so a
-  // real Ready is observed promptly instead of waiting for the local timer to 0.
-  const precisionLeadMs = settings.precisionWindowSec * 1000 + 1_500;
-  const precisionAt = Math.max(now + 50, predictedReadyAt - precisionLeadMs);
+  // v0.3.7 does not OCR-loop across the Ready boundary. Wake early enough for
+  // two authoritative countdown reads, lock the boundary, then black out OCR
+  // and cover the transition with scheduled E presses.
+  const finalLockLeadMs = Math.max(6_000, (settings.precisionWindowSec + 2) * 1000);
+  const precisionAt = Math.max(now + 50, predictedReadyAt - finalLockLeadMs);
   void scheduleOffscreenWake("boost-precision", precisionAt);
   void chrome.alarms.clear(BOOST_WAKE).then(() => {
     chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt!) });
@@ -1033,6 +1050,7 @@ function scheduleCooldown(seconds: number) {
   precisionWindowActive = false;
   boostCycle = undefined;
   boostStateEpoch += 1;
+  resetBoundaryState();
 
   // applyBoostObservation owns cooldown authority. If there is still no trusted
   // prediction, this was only the first/provisional numeric sample (or a
@@ -1121,62 +1139,190 @@ async function syncCooldown() {
 }
 
 function enterPrecisionWindow() {
-  if (precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault) return;
+  if (precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || predictedReadyAt === undefined) return;
   precisionWindowActive = true;
-  // Once precision owns the boundary, cancel the normal cooldown-sync wake so
-  // two OCR reads cannot collide at the same transition.
+  finalLockSample = undefined;
+  finalLockAttempts = 0;
+  finalLockConfirmed = false;
+  boundaryWakeAt = undefined;
   void cancelOffscreenWake("boost-sync");
+  void cancelOffscreenWake("counter");
   nextCooldownSyncAt = 0;
   setPowerState("precision");
-  const remaining = predictedReadyAt ? Math.max(0, (predictedReadyAt - Date.now()) / 1000) : 0;
-  log(`Precision window started at ${remaining.toFixed(2)}s predicted remaining. Blocks counter OCR is paused.`);
+  const remaining = Math.max(0, (predictedReadyAt - Date.now()) / 1000);
+  log(`Final timing lock started at ${remaining.toFixed(2)}s predicted remaining. Counter OCR is blacked out until activation verification.`, "info", {
+    category: "timer", event: "boundary.lock_started", details: { remainingSeconds: remaining }
+  });
   void scheduleOffscreenWake("boost-precision", Date.now() + 50);
 }
 
-async function precisionBoostTick() {
-  if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle) return;
-  const remainingMs = predictedReadyAt === undefined ? 0 : predictedReadyAt - Date.now();
-  const plan = precisionProbePlan({
-    remainingMs,
-    hasMicroCrop: Boolean(boostMicroCrop),
-    fastRecognizerReady
+function scheduleBoundaryBurst() {
+  if (!settings.autoBoost || connectedTabId === undefined || boostFault || predictedReadyAt === undefined || !finalLockConfirmed) return;
+  void cancelOffscreenWake("boost-sync");
+  void cancelOffscreenWake("boost-precision");
+  void cancelOffscreenWake("counter");
+  boundaryWakeAt = Math.max(Date.now() + 25, predictedReadyAt - BOUNDARY_WAKE_LEAD_MS);
+  setPowerState("precision");
+  log(`Final timing lock accepted. OCR/counter blackout armed; boundary input wake in ${Math.max(0, boundaryWakeAt - Date.now())}ms.`, "info", {
+    category: "timer", event: "boundary.armed", details: { predictedReadyAt, boundaryWakeAt, uncertaintySec: cooldownUncertaintySec }
   });
+  void scheduleOffscreenWake("boost-boundary", boundaryWakeAt);
+  // Chrome alarm is only a coarse fallback if the offscreen wake is lost.
+  void chrome.alarms.clear(BOOST_WAKE).then(() => {
+    chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt! + 250) });
+  });
+}
+
+async function precisionBoostTick() {
+  if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle || predictedReadyAt === undefined) return;
   try {
-    const observed = await readBoost("boost-critical", {
-      fastOnly: plan.fastOnly,
-      // Precision is allowed one safe same-profile fallback, but never a
-      // multi-profile hunt that can visibly stall the game near Ready.
-      noProfileFallback: true
-    });
+    const observed = await readBoost("boost-critical", { noProfileFallback: true });
+    if (observed.state === "unknown" && quickTransitionConfirm && pendingTransitionConfirm?.state === "ready") {
+      log("Unexpected Ready candidate is awaiting its second fresh confirmation; rechecking in 0.10s.", "debug", {
+        category: "chopping", event: "boundary.rapid_ready_confirm"
+      });
+      void scheduleOffscreenWake("boost-precision", Date.now() + 100);
+      return;
+    }
     if (observed.state === "ready") {
       precisionWindowActive = false;
-      const finishedAt = Date.now();
-      log(`Actual Ready confirmed. Recognition finished ${Math.max(0, finishedAt - (lastBoostCaptureAt || finishedAt))}ms after screenshot capture.`, "info", {
-        category: "chopping", event: "ready.confirmed", details: { captureToRecognitionMs: Math.max(0, finishedAt - (lastBoostCaptureAt || finishedAt)), fastOnly: plan.fastOnly }
-      });
+      finalLockConfirmed = false;
+      log("Actual Ready appeared during final timing lock; taking the direct activation path immediately.", "info", { category: "chopping", event: "boundary.ready_early" });
       await beginBoostCycle();
       return;
     }
     if (observed.state === "active") {
       precisionWindowActive = false;
+      resetBoundaryState();
       scheduleActiveCheck();
       return;
     }
-    if (observed.state === "cooldown" && predictedReadyAt !== undefined) {
-      const left = predictedReadyAt - Date.now();
-      if (left > (settings.precisionWindowSec + 2) * 1000) {
-        precisionWindowActive = false;
-        log("Precision window moved back after cooldown re-sync; returning to low-overhead monitoring.", "info", { category: "timer", event: "precision.exit" });
-        scheduleCooldownMonitoring();
+    if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined && lastBoostCaptureAt !== undefined) {
+      const sample = { seconds: observed.cooldownSeconds, captureAt: lastBoostCaptureAt };
+      finalLockAttempts += 1;
+      if (!finalLockSample) {
+        finalLockSample = sample;
+        log(`Final timing lock sample 1: ${sample.seconds}s. Taking the confirming sample in 0.45s.`, "debug", {
+          category: "timer", event: "boundary.lock_sample", details: { sample: 1, seconds: sample.seconds, captureAt: sample.captureAt }
+        });
+        void scheduleOffscreenWake("boost-precision", Date.now() + 450);
+        return;
+      }
+
+      if (finalLockSamplesAgree(finalLockSample, sample)) {
+        const firstReadyAt = cooldownReadyEstimateMs(finalLockSample);
+        const secondReadyAt = cooldownReadyEstimateMs(sample);
+        predictedReadyAt = Math.round((firstReadyAt + secondReadyAt) / 2);
+        boostCooldownReadyAt = predictedReadyAt;
+        const disagreementMs = Math.abs(firstReadyAt - secondReadyAt);
+        cooldownUncertaintySec = Math.max(0.5, Math.min(1, 0.5 + disagreementMs / 2000));
+        finalLockConfirmed = true;
+        finalLockSample = undefined;
+        log(`Final timing lock confirmed from two countdown reads; Ready boundary ${new Date(predictedReadyAt).toLocaleTimeString()} with ≤±${cooldownUncertaintySec.toFixed(2)}s modeled uncertainty.`, "info", {
+          category: "timer", event: "boundary.lock_confirmed", details: { predictedReadyAt, disagreementMs, attempts: finalLockAttempts }
+        });
+        scheduleBoundaryBurst();
+        return;
+      }
+
+      rejectedOcrCount += 1;
+      log(`Final timing lock samples disagreed (${finalLockSample.seconds}s → ${sample.seconds}s); the newer sample replaces the older candidate.`, "warn", {
+        category: "timer", event: "boundary.lock_rejected", details: { firstSeconds: finalLockSample.seconds, secondSeconds: sample.seconds }
+      });
+      finalLockSample = sample;
+      const remainingMs = predictedReadyAt - Date.now();
+      if (finalLockAttempts < 4 && remainingMs > 1_800) {
+        void scheduleOffscreenWake("boost-precision", Date.now() + 350);
         return;
       }
     }
+
+    // If the strict timer lock cannot be established, do not blind-fire a
+    // boundary burst. Fall back to rapid actual-state confirmation. This path
+    // is intentionally less deterministic but remains fail-closed.
+    finalLockConfirmed = false;
+    const remainingMs = predictedReadyAt - Date.now();
+    if (remainingMs > -1_000) {
+      const retryMs = fastRecognizerReady && boostMicroCrop ? 180 : 350;
+      log(`Final timing lock is not trustworthy; using rapid Ready-confirmation fallback in ${retryMs}ms.`, "warn", {
+        category: "timer", event: "boundary.fallback_ready_ocr", details: { remainingMs, retryMs }
+      });
+      void scheduleOffscreenWake("boost-precision", Date.now() + retryMs);
+      return;
+    }
+    precisionWindowActive = false;
+    log("Final timing lock expired without a trustworthy boundary. No blind E was sent; retrying a safe state read.", "warn", { category: "timer", event: "boundary.lock_failed" });
+    scheduleRecheck(0.15);
   } catch (error) {
-    log(`Precision Chopping read: ${errorText(error)}`, "warn", { category: "chopping", event: "precision.error" });
+    finalLockConfirmed = false;
+    log(`Final timing lock read failed: ${errorText(error)}. No blind boundary input was armed.`, "warn", { category: "timer", event: "boundary.lock_error" });
+    if (predictedReadyAt - Date.now() > -1_000) void scheduleOffscreenWake("boost-precision", Date.now() + 350);
+    else scheduleRecheck(0.15);
   }
-  if (precisionWindowActive) {
-    const nextDelayMs = quickTransitionConfirm ? Math.min(150, plan.nextDelayMs) : plan.nextDelayMs;
-    void scheduleOffscreenWake("boost-precision", Date.now() + nextDelayMs);
+}
+
+async function runBoundaryActivation() {
+  if (!settings.autoBoost || boostFault || connectedTabId === undefined || boostCycle || boundaryBurstRunning || !finalLockConfirmed || predictedReadyAt === undefined) return;
+  const boundary = predictedReadyAt;
+  boundaryBurstRunning = true;
+  boundaryWakeAt = undefined;
+  boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0, readyConfirmReads: 0 };
+  setPowerState("activating");
+  boostStateEpoch += 1;
+  pendingTransitionConfirm = undefined;
+  quickTransitionConfirm = false;
+  void cancelOffscreenWake("boost-sync");
+  void cancelOffscreenWake("boost-precision");
+  void cancelOffscreenWake("counter");
+  void chrome.alarms.clear(BOOST_WAKE);
+
+  try {
+    await focusGameSurface("Boundary boost input");
+    let sent = 0;
+    let skipped = 0;
+    const dispatchOffsets: number[] = [];
+    for (let index = 0; index < BOUNDARY_E_OFFSETS_MS.length; index += 1) {
+      const offsetMs = BOUNDARY_E_OFFSETS_MS[index];
+      const targetAt = boundary + offsetMs;
+      const lateBy = Date.now() - targetAt;
+      if (lateBy > 140 && index < BOUNDARY_E_OFFSETS_MS.length - 1) {
+        skipped += 1;
+        continue;
+      }
+      const waitMs = targetAt - Date.now();
+      if (waitMs > 0) await delay(waitMs);
+      const dispatchAt = Date.now();
+      await keyE();
+      sent += 1;
+      dispatchOffsets.push(dispatchAt - boundary);
+    }
+    if (sent === 0) {
+      const dispatchAt = Date.now();
+      await keyE();
+      sent = 1;
+      dispatchOffsets.push(dispatchAt - boundary);
+    }
+    boundaryBurstRunning = false;
+    precisionWindowActive = false;
+    finalLockConfirmed = false;
+    const offsetSummary = dispatchOffsets.map(value => `${value >= 0 ? "+" : ""}${value}ms`).join(", ");
+    log(`Boundary activation window completed with ${sent} E press${sent === 1 ? "" : "es"}${skipped ? ` (${skipped} stale slot${skipped === 1 ? "" : "s"} skipped)` : ""}. Dispatch offsets: ${offsetSummary || "none"}. One verification read follows in 0.45s.`, "info", {
+      category: "input", event: "input.boundary_complete", details: {
+        sent, skipped, predictedReadyAt: boundary,
+        firstDispatchOffsetMs: dispatchOffsets[0],
+        lastDispatchOffsetMs: dispatchOffsets[dispatchOffsets.length - 1]
+      }
+    });
+    scheduleVerify(0.45);
+  } catch (error) {
+    boundaryBurstRunning = false;
+    precisionWindowActive = false;
+    finalLockConfirmed = false;
+    boostCycle = undefined;
+    boostFault = `Could not send boundary E input: ${errorText(error)}`;
+    setPowerState("fault");
+    scheduleCounter(1_000);
+    log(boostFault, "error", { category: "input", event: "input.boundary_fault" });
   }
 }
 
@@ -1189,8 +1335,12 @@ async function beginBoostCycle() {
     pendingTransitionConfirm = undefined;
     quickTransitionConfirm = false;
     precisionWindowActive = false;
+    finalLockConfirmed = false;
+    boundaryBurstRunning = false;
+    boundaryWakeAt = undefined;
     void cancelOffscreenWake("boost-sync");
     void cancelOffscreenWake("boost-precision");
+    void cancelOffscreenWake("boost-boundary");
     const readyAt = Date.now();
     log(`Chopping Ready confirmed. Starting primary E ×5 activation burst${lastBoostCaptureAt ? ` (${Math.max(0, readyAt - lastBoostCaptureAt)}ms after Ready screenshot)` : ""}.`);
     await pressEBurst(5, "Primary boost input");
@@ -1653,9 +1803,6 @@ function status(): LiveExtensionStatus {
     };
   }
   const liveSnapshot = currentSnapshot ? { ...currentSnapshot } : undefined;
-  if (liveSnapshot && liveChoppingSkill.state !== "unknown") {
-    liveSnapshot.chopping = { ...(liveSnapshot.chopping || {}), skill: liveChoppingSkill };
-  }
 
   let health: LiveExtensionStatus["health"] = "healthy";
   let healthReason = "Runtime state is within configured reliability limits.";
@@ -1855,7 +2002,9 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
           return { ok: true, status: status() };
         }
         if (!settings.autoBoost || connectedTabId === undefined || boostFault) return { ok: true, status: status() };
-        if (command.id === "boost-precision") {
+        if (command.id === "boost-boundary") {
+          await runBoundaryActivation();
+        } else if (command.id === "boost-precision") {
           if (!precisionWindowActive) enterPrecisionWindow();
           else await precisionBoostTick();
         } else if (command.id === "boost-verify") {
@@ -1894,11 +2043,17 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name !== BOOST_WAKE) return;
   boostWakeAt = undefined;
-  if (precisionWindowActive) {
-    log("Cooldown wake alarm fired while precision watcher is already active; duplicate OCR skipped.");
+  if (boundaryBurstRunning || boostCycle) return;
+  if (finalLockConfirmed && predictedReadyAt !== undefined) {
+    log("Boundary fallback alarm fired; invoking the already-locked input window without starting OCR.", "warn", { category: "timer", event: "boundary.alarm_fallback" });
+    void ensureLoaded().then(runBoundaryActivation);
     return;
   }
-  log("Cooldown wake alarm fired; checking Chopping state now.");
+  if (precisionWindowActive) {
+    log("Cooldown wake alarm fired while final timing lock is active; duplicate OCR skipped.");
+    return;
+  }
+  log("Cooldown wake alarm fired without a final lock; checking Chopping state now.");
   void ensureLoaded().then(wakeBoost);
 });
 
