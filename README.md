@@ -73,7 +73,7 @@ Expensive capture/OCR work uses a single-concurrency priority queue: critical Ch
 
 ### Counter, sessions and Dumb mode
 
-Live Blocks mined uses a small crop at the configured counter interval (20 seconds by default) while a run is active. It is scheduled independently of the UI, so closing the side panel does not stop an active run or Chopping automation. Counter work is deferred during the precision Ready window. Rolling blocks/second uses screenshot capture timestamps and is displayed to 6 significant figures.
+Live Blocks mined uses a small crop at the configured counter interval (20 seconds by default) while a run is active. It is scheduled independently of the UI, so closing the side panel does not stop an active run or Chopping automation. Counter work is deferred when Chopping is near or inside the precision Ready window. Rolling blocks/second uses screenshot capture timestamps and is displayed to 6 significant figures.
 
 Dumb mode forces Auto connection, Auto Chopping, the nominal 15-second Chopping synchronization and live counter. Before the run starts, a tiny counter check runs about every two seconds. The first observed increase starts an AFK run from the previous counter sample; stopping remains manual so the user controls the final boundary. Complete right-sidebar OCR snapshots are still captured at run start/end and raw recognized text remains local.
 
@@ -89,7 +89,7 @@ Mini mode shows Chopping state, Blocks mined, rolling speed, run progress and he
 - Chopping cooldown: sleep between scheduled tiny reads; nominal 15-second sync in Dumb mode
 - precision window: counter paused; learned state matching preferred; Tesseract is a guarded fallback rather than a constant sub-second loop
 - live counter: small crop, default 20 seconds while a run is active
-- UI: side panel and optional monitor display cached/event-driven state; `GET_STATUS` does not itself trigger OCR
+- UI: side panel and optional monitor display cached/event-driven state; `GET_STATUS` does not itself trigger OCR or connection recovery
 - OCR worker: kept loaded but idle during sleep periods to avoid repeated initialization spikes
 
 The Diagnostics surfaces report structured state-machine, timer, OCR, input, counter and session events. Measured live Chromebook performance and real Ready→E latency still require an actual Bloxd browser run; CI cannot prove those runtime quantities.
@@ -119,7 +119,7 @@ Build it, then in Chrome:
 
 The extension requests the `debugger` permission because it uses DevTools Protocol for cropped screen capture and E-key dispatch. Chrome may visibly indicate that the Bloxd tab is being debugged. Automated game input should only be used where permitted by the game's rules.
 
-Every push to `main` also runs **Build Chrome extension** and uploads `oneblock-analytics-extension.zip` as a GitHub Actions artifact.
+Every push to `main` also runs **Build Chrome extension** and uploads `oneblock-analytics-extension.zip` as a GitHub Actions artifact. Release ZIPs should be taken from the audited merged-`main` workflow, not from an intermediate feature-branch build.
 
 ## GitHub Codespaces
 
