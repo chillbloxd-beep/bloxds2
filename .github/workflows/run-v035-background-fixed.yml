@@ -1,0 +1,34 @@
+name: Run corrected v0.3.5 background migration
+
+on:
+  push:
+    branches:
+      - feature/reliability-performance-v035
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply corrected v0.3.5 background reliability patch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reliability-performance-v035
+          fetch-depth: 0
+      - name: Apply corrected migration
+        run: python scripts/run-v035-background-fixed.py
+      - name: Remove one-time migration files
+        run: |
+          rm -f scripts/apply-v035-background.py
+          rm -f scripts/run-v035-background-fixed.py
+          rm -f .github/workflows/apply-v035-background.yml
+          rm -f .github/workflows/run-v035-background-fixed.yml
+      - name: Commit migration
+        run: |
+          git config user.name "OneBlock Analytics CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Apply corrected v0.3.5 background reliability patch"
+          git push origin HEAD:feature/reliability-performance-v035
