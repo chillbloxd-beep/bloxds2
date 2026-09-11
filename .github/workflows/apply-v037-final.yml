@@ -22,17 +22,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Tighten final-lock agreement before migration
+      - name: Tighten final-lock agreement and current audit before migration
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('scripts/apply-v037-final.py')
           text = p.read_text()
-          old = 'return cooldownSamplesAgree(first, second, FINAL_LOCK_AGREEMENT_MS);'
-          new = 'return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one final-lock helper to tighten, found {text.count(old)}')
-          p.write_text(text.replace(old, new, 1))
+          patches = [
+              (
+                  'return cooldownSamplesAgree(first, second, FINAL_LOCK_AGREEMENT_MS);',
+                  'return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;'
+              ),
+              (
+                  'expect(background.includes("precisionWindowActive || nearReady"), "counter is not pre-deferred just before the precision window");',
+                  'expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter is not pre-deferred across the final lock/input/verification window");'
+              )
+          ]
+          for old, new in patches:
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one migration patch target, found {text.count(old)}: {old}')
+              text = text.replace(old, new, 1)
+          p.write_text(text)
           PY
       - name: Apply deterministic migration
         run: python3 scripts/apply-v037-final.py
