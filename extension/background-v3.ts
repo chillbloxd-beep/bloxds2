@@ -700,9 +700,9 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
     if (skill.state !== "unknown") return skill;
     if (options.fastOnly || options.noProfileFallback) return skill;
 
-    if (boostMisses < 1) {
+    if (boostMisses < 2) {
       boostMisses += 1;
-      log("Chopping OCR missed the active crop once; deferring multi-profile recovery to avoid a transient renderer spike.", "debug", {
+      log(`Chopping OCR miss ${boostMisses}/2 on the active profile; deferring multi-profile recovery to avoid a renderer spike.`, "debug", {
         category: "ocr", event: "boost.profile_recovery_deferred"
       });
       return skill;
@@ -1177,6 +1177,13 @@ async function precisionBoostTick() {
   if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle || predictedReadyAt === undefined) return;
   try {
     const observed = await readBoost("boost-critical", { noProfileFallback: true });
+    if (observed.state === "unknown" && quickTransitionConfirm && pendingTransitionConfirm?.state === "ready") {
+      log("Unexpected Ready candidate is awaiting its second fresh confirmation; rechecking in 0.10s.", "debug", {
+        category: "chopping", event: "boundary.rapid_ready_confirm"
+      });
+      void scheduleOffscreenWake("boost-precision", Date.now() + 100);
+      return;
+    }
     if (observed.state === "ready") {
       precisionWindowActive = false;
       finalLockConfirmed = false;
@@ -1272,14 +1279,14 @@ async function runBoundaryActivation() {
   try {
     await focusGameSurface("Boundary boost input");
     let sent = 0;
+    let skipped = 0;
+    const dispatchOffsets: number[] = [];
     for (let index = 0; index < BOUNDARY_E_OFFSETS_MS.length; index += 1) {
       const offsetMs = BOUNDARY_E_OFFSETS_MS[index];
       const targetAt = boundary + offsetMs;
       const lateBy = Date.now() - targetAt;
       if (lateBy > 140 && index < BOUNDARY_E_OFFSETS_MS.length - 1) {
-        log(`Boundary E ${index + 1}/${BOUNDARY_E_OFFSETS_MS.length} skipped because its target was already ${lateBy}ms stale.`, "debug", {
-          category: "input", event: "input.boundary_skipped", details: { index: index + 1, offsetMs, lateByMs: lateBy }
-        });
+        skipped += 1;
         continue;
       }
       const waitMs = targetAt - Date.now();
@@ -1287,23 +1294,24 @@ async function runBoundaryActivation() {
       const dispatchAt = Date.now();
       await keyE();
       sent += 1;
-      log(`Boundary E ${index + 1}/${BOUNDARY_E_OFFSETS_MS.length} sent at ${dispatchAt - boundary >= 0 ? "+" : ""}${dispatchAt - boundary}ms vs predicted Ready.`, "debug", {
-        category: "input", event: "input.boundary_e", details: { index: index + 1, offsetMs, dispatchOffsetMs: dispatchAt - boundary }
-      });
+      dispatchOffsets.push(dispatchAt - boundary);
     }
     if (sent === 0) {
       const dispatchAt = Date.now();
       await keyE();
       sent = 1;
-      log("Boundary wake arrived after all planned slots; sent one immediate recovery E instead of replaying stale taps.", "warn", {
-        category: "input", event: "input.boundary_late", details: { dispatchOffsetMs: dispatchAt - boundary }
-      });
+      dispatchOffsets.push(dispatchAt - boundary);
     }
     boundaryBurstRunning = false;
     precisionWindowActive = false;
     finalLockConfirmed = false;
-    log(`Boundary activation window completed with ${sent} E press${sent === 1 ? "" : "es"}. One verification read follows in 0.45s.`, "info", {
-      category: "input", event: "input.boundary_complete", details: { sent, predictedReadyAt: boundary }
+    const offsetSummary = dispatchOffsets.map(value => `${value >= 0 ? "+" : ""}${value}ms`).join(", ");
+    log(`Boundary activation window completed with ${sent} E press${sent === 1 ? "" : "es"}${skipped ? ` (${skipped} stale slot${skipped === 1 ? "" : "s"} skipped)` : ""}. Dispatch offsets: ${offsetSummary || "none"}. One verification read follows in 0.45s.`, "info", {
+      category: "input", event: "input.boundary_complete", details: {
+        sent, skipped, predictedReadyAt: boundary,
+        firstDispatchOffsetMs: dispatchOffsets[0],
+        lastDispatchOffsetMs: dispatchOffsets[dispatchOffsets.length - 1]
+      }
     });
     scheduleVerify(0.45);
   } catch (error) {
