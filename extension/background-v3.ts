@@ -1,6 +1,8 @@
 import type { MiningSession, SidebarSnapshot, SkillStateSnapshot } from "../src/types";
 import { cropRegion, isUsableSnapshot, profileOrder, snapshotScore, type OcrViewport } from "../src/extension/crop";
 import { isOneBlockUrl, lobbyFromUrl } from "../src/extension/parser";
+import type { RelativeOcrRect } from "../src/extension/ocrCalibration";
+import { OcrDeadlineError, PriorityOcrQueue, cooldownSyncDelayMs, isStaleObservation, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
 import type {
   ActiveExtensionSession,
   BackgroundCommand,
@@ -11,7 +13,9 @@ import type {
   OcrCropProfile,
   OcrMode,
   OcrRequest,
-  OcrResponse
+  OcrResponse,
+  OffscreenControlRequest,
+  OffscreenWakeId
 } from "../src/extension/types";
 
 const SETTINGS_KEY = "oba.extension.settings";
@@ -54,16 +58,29 @@ let boostTotals = {
   cooldownsRead: [] as number[]
 };
 let diagnostics: DiagnosticEntry[] = [];
-let verifyTimer: number | undefined;
-let activeTimer: number | undefined;
-let recheckTimer: number | undefined;
-let counterTimer: number | undefined;
 let connectFlight: Promise<void> | null = null;
 let connectingTabId: number | undefined;
 let fullReadFlight: Promise<SidebarSnapshot> | null = null;
-let ocrQueue: Promise<void> = Promise.resolve();
+const ocrQueue = new PriorityOcrQueue();
 let activeOcrProfile: OcrCropProfile | undefined;
 let lastViewport: OcrViewport | undefined;
+let viewportCheckedAt = 0;
+let connectionEpoch = 0;
+let fullGeneration = 0;
+let counterGeneration = 0;
+let boostGeneration = 0;
+let boostStateEpoch = 0;
+let lastAcceptedCounterGeneration = 0;
+let lastAcceptedBoostGeneration = 0;
+let lastAcceptedCounterCaptureAt = 0;
+let lastAcceptedBoostCaptureAt = 0;
+let boostMicroCrop: { key: string; rect: RelativeOcrRect } | undefined;
+let counterMicroCrop: { key: string; rect: RelativeOcrRect } | undefined;
+let fastBoostHits = 0;
+let cooldownUncertaintySec = 2;
+let nextCooldownSyncAt = 0;
+let pendingTransitionConfirm: { state: "ready" | "active"; captureAt: number } | undefined;
+let quickTransitionConfirm = false;
 let counterMisses = 0;
 let boostMisses = 0;
 let lastCounterReadAt = 0;
@@ -76,7 +93,6 @@ let predictedReadyAt: number | undefined;
 let lastBoostCaptureAt: number | undefined;
 let boostDriftSeconds: number | undefined;
 let lastCooldownSyncAt = 0;
-let precisionTimer: number | undefined;
 let precisionWindowActive = false;
 let dumbModeArmed = false;
 let dumbBaseline: { value: number; at: number } | undefined;
@@ -136,10 +152,71 @@ function recordOcr(response: OcrResponse) {
   lastOcrMs = response.elapsedMs;
 }
 
-function enqueueOcr<T>(task: () => Promise<T>): Promise<T> {
-  const next = ocrQueue.then(task, task);
-  ocrQueue = next.then(() => undefined, () => undefined);
-  return next;
+function microCalibrationKey(profile: OcrCropProfile, view: OcrViewport) {
+  return `${profile}:${Math.round(view.width)}x${Math.round(view.height)}`;
+}
+
+function applyRelativeRect(
+  base: { x: number; y: number; width: number; height: number; scale: number },
+  rect: RelativeOcrRect
+) {
+  return {
+    x: base.x + base.width * rect.x,
+    y: base.y + base.height * rect.y,
+    width: Math.max(1, base.width * rect.width),
+    height: Math.max(1, base.height * rect.height),
+    scale: 1
+  };
+}
+
+function invalidateViewportCache() {
+  lastViewport = undefined;
+  viewportCheckedAt = 0;
+}
+
+function invalidateMicroCrops() {
+  boostMicroCrop = undefined;
+  counterMicroCrop = undefined;
+}
+
+async function sendOffscreenControl(message: OffscreenControlRequest) {
+  await ensureOffscreen();
+  const response = await chrome.runtime.sendMessage(message) as { ok?: boolean; error?: string } | undefined;
+  if (!response?.ok) throw new Error(response?.error || `Offscreen ${message.type} failed.`);
+}
+
+async function scheduleOffscreenWake(id: OffscreenWakeId, when: number) {
+  try {
+    await sendOffscreenControl({ target: "offscreen", type: "SCHEDULE_WAKE", id, when });
+  } catch (error) {
+    log(`Could not schedule ${id}: ${errorText(error)}`, "warn");
+  }
+}
+
+async function cancelOffscreenWake(id: OffscreenWakeId) {
+  if (!(await chrome.offscreen.hasDocument())) return;
+  try {
+    const response = await chrome.runtime.sendMessage({ target: "offscreen", type: "CANCEL_WAKE", id } satisfies OffscreenControlRequest) as { ok?: boolean } | undefined;
+    if (!response?.ok) log(`Offscreen ${id} cancellation was not acknowledged.`, "warn");
+  } catch {
+    // Closing/restarting the offscreen document implicitly cancels its timers.
+  }
+}
+
+function cancelAllBoostWakes() {
+  for (const id of ["boost-sync", "boost-precision", "boost-verify", "boost-active"] as OffscreenWakeId[]) {
+    void cancelOffscreenWake(id);
+  }
+}
+
+function ocrResponseWithTimeout(request: OcrRequest, timeoutMs = 12_000): Promise<OcrResponse> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`OCR ${request.mode} timed out after ${timeoutMs}ms.`)), timeoutMs);
+    chrome.runtime.sendMessage(request)
+      .then(response => resolve(response as OcrResponse))
+      .catch(reject)
+      .finally(() => clearTimeout(timer));
+  });
 }
 
 async function ensureOffscreen() {
@@ -160,7 +237,9 @@ async function debuggerCommand<T = unknown>(method: string, params?: { [key: str
   return await directDebuggerCommand<T>(connectedTabId, method, params);
 }
 
-async function viewport(): Promise<OcrViewport> {
+async function viewport(force = false): Promise<OcrViewport> {
+  const now = Date.now();
+  if (!force && lastViewport && now - viewportCheckedAt < 5_000) return lastViewport;
   const metrics = await debuggerCommand<any>("Page.getLayoutMetrics");
   const visual = metrics.cssVisualViewport || metrics.visualViewport || metrics.cssContentSize || metrics.contentSize;
   const width = Number(visual?.clientWidth ?? visual?.width);
@@ -170,7 +249,15 @@ async function viewport(): Promise<OcrViewport> {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error("Could not determine the Bloxd game viewport size.");
   }
+  const changed = lastViewport
+    && (Math.abs(lastViewport.width - width) > 1 || Math.abs(lastViewport.height - height) > 1
+      || Math.abs(lastViewport.pageX - pageX) > 1 || Math.abs(lastViewport.pageY - pageY) > 1);
   lastViewport = { width, height, pageX, pageY };
+  viewportCheckedAt = now;
+  if (changed) {
+    invalidateMicroCrops();
+    log(`Bloxd viewport changed to ${Math.round(width)}×${Math.round(height)}; micro OCR will recalibrate.`);
+  }
   return lastViewport;
 }
 
@@ -180,16 +267,42 @@ function orderedProfiles(view: OcrViewport): OcrCropProfile[] {
   return [activeOcrProfile, ...ordered.filter(profile => profile !== activeOcrProfile)];
 }
 
-async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrResponse & { captureAt: number }> {
-  return enqueueOcr(async () => {
+type CapturedOcrResponse = OcrResponse & {
+  captureAt: number;
+  connectionEpoch: number;
+  generation: number;
+  boostEpoch: number;
+  calibrationKey: string;
+  usedMicro: boolean;
+};
+
+async function captureOcr(
+  mode: OcrMode,
+  profile: OcrCropProfile,
+  options: {
+    workClass: OcrWorkClass;
+    generation: number;
+    boostEpoch?: number;
+    microRect?: RelativeOcrRect;
+    preferFast?: boolean;
+    forceViewport?: boolean;
+  }
+): Promise<CapturedOcrResponse> {
+  const requestedConnectionEpoch = connectionEpoch;
+  const requestedBoostEpoch = options.boostEpoch ?? boostStateEpoch;
+  return ocrQueue.enqueue(options.workClass, async () => {
+    if (requestedConnectionEpoch !== connectionEpoch) throw new Error("Discarded OCR work from an older connection epoch.");
     await ensureOffscreen();
-    const view = await viewport();
-    const clip = cropRegion(profile, mode, view);
+    const view = await viewport(Boolean(options.forceViewport));
+    const baseClip = cropRegion(profile, mode, view);
+    const clip = options.microRect ? applyRelativeRect(baseClip, options.microRect) : baseClip;
+    const key = microCalibrationKey(profile, view);
     const captureAt = Date.now();
     const capture = await debuggerCommand<{ data: string }>("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
       captureBeyondViewport: false,
+      optimizeForSpeed: true,
       clip
     });
     if (!capture?.data) throw new Error(`Screenshot capture returned no data (${mode}/${profile}).`);
@@ -198,13 +311,34 @@ async function captureOcr(mode: OcrMode, profile: OcrCropProfile): Promise<OcrRe
       target: "offscreen",
       type: "OCR",
       mode,
-      imageDataUrl: `data:image/png;base64,${capture.data}`
+      imageDataUrl: `data:image/png;base64,${capture.data}`,
+      calibrationKey: key,
+      inputScope: options.microRect ? "micro" : "base",
+      preferFast: Boolean(options.preferFast && options.microRect)
     };
-    const response = await chrome.runtime.sendMessage(request) as OcrResponse;
+
+    let response: OcrResponse;
+    try {
+      response = await ocrResponseWithTimeout(request);
+    } catch (error) {
+      if (/timed out/i.test(errorText(error))) {
+        log(`OCR watchdog restarting the offscreen worker after timeout (${mode}/${profile}).`, "warn");
+        await closeOffscreen();
+      }
+      throw error;
+    }
     if (!response) throw new Error(`OCR worker returned no response (${mode}/${profile}).`);
     if (!response.ok) throw new Error(`${response.error || "OCR failed"} [${mode}/${profile}]`);
     recordOcr(response);
-    return { ...response, captureAt };
+    return {
+      ...response,
+      captureAt,
+      connectionEpoch: requestedConnectionEpoch,
+      generation: options.generation,
+      boostEpoch: requestedBoostEpoch,
+      calibrationKey: key,
+      usedMicro: Boolean(options.microRect)
+    };
   });
 }
 
@@ -231,7 +365,10 @@ function setChoppingSkill(skill: SkillStateSnapshot) {
 function applySnapshot(snapshot: SidebarSnapshot, sampleAt = Date.now()) {
   currentSnapshot = snapshot;
   lastFullReadAt = Date.now();
-  if (snapshot.blocksMined !== undefined) updateCounter(snapshot.blocksMined, sampleAt);
+  if (snapshot.blocksMined !== undefined) {
+    const accepted = updateCounter(snapshot.blocksMined, sampleAt);
+    if (!accepted && lastCounter) snapshot.blocksMined = lastCounter.value;
+  }
   if (snapshot.chopping?.skill) {
     lastBoostCaptureAt = sampleAt;
     applyBoostObservation(snapshot.chopping.skill, sampleAt);
@@ -249,8 +386,9 @@ async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapsho
 
   for (const profile of candidates) {
     try {
-      const response = await captureOcr("full", profile);
+      const response = await captureOcr("full", profile, { workClass: "full", generation: ++fullGeneration });
       const snapshot = response.snapshot;
+      if (snapshot) snapshot.capturedAt = new Date(response.captureAt).toISOString();
       const score = snapshotScore(snapshot);
       attempted.push(`${profile}:${score}`);
       if (snapshot && (!best || score > best.score)) best = { profile, snapshot, score };
@@ -260,6 +398,7 @@ async function performFullRead(forceRecalibrate = false): Promise<SidebarSnapsho
         applySnapshot(snapshot!, response.captureAt);
         counterMisses = 0;
         if (changed) {
+          invalidateMicroCrops();
           log(`OCR calibrated to ${profile} for ${Math.round(view.width)}×${Math.round(view.height)} viewport.`);
         }
         return snapshot!;
@@ -289,77 +428,200 @@ async function readFullSnapshot(forceRecalibrate = false): Promise<SidebarSnapsh
 }
 
 async function readCounter(): Promise<number | undefined> {
-  const view = await viewport();
-  const profiles = orderedProfiles(view);
-  const primary = profiles[0];
-  let response = await captureOcr("counter", primary);
-  if (response.blocksMined !== undefined) {
-    counterMisses = 0;
-    updateCounter(response.blocksMined, response.captureAt);
-    return response.blocksMined;
-  }
+  const generation = ++counterGeneration;
 
-  counterMisses += 1;
-  if (counterMisses < 2) return undefined;
+  const attempt = async (profile: OcrCropProfile, forceBase = false): Promise<number | undefined> => {
+    const view = await viewport();
+    const key = microCalibrationKey(profile, view);
+    const stored = !forceBase && counterMicroCrop?.key === key ? counterMicroCrop : undefined;
+    let response = await captureOcr("counter", profile, {
+      workClass: "counter",
+      generation,
+      microRect: stored?.rect
+    });
 
-  // Two consecutive misses indicate that the viewport may have changed (for
-  // example the Chrome side panel was opened/closed). Try small alternate
-  // crops before paying for a full-panel recalibration.
-  for (const profile of profiles.slice(1, 3)) {
-    response = await captureOcr("counter", profile);
-    if (response.blocksMined !== undefined) {
-      activeOcrProfile = profile;
-      counterMisses = 0;
-      updateCounter(response.blocksMined, response.captureAt);
-      log(`Counter crop automatically recalibrated to ${profile}.`);
-      return response.blocksMined;
+    if (isStaleObservation(
+      { connectionEpoch: response.connectionEpoch, generation: response.generation, captureAt: response.captureAt },
+      connectionEpoch,
+      lastAcceptedCounterGeneration,
+      lastAcceptedCounterCaptureAt
+    )) return undefined;
+
+    if (!response.usedMicro && response.microRect && response.blocksMined !== undefined) {
+      counterMicroCrop = { key: response.calibrationKey, rect: response.microRect };
+      log("Counter micro-crop calibrated from Tesseract word geometry.");
     }
-  }
 
-  counterMisses = 0;
-  log("Counter OCR missed all small crops; skipping automatic full-panel recalibration to protect game performance. Use Recalibrate OCR if this continues.", "warn");
-  return undefined;
+    if (response.usedMicro && response.blocksMined === undefined) {
+      counterMicroCrop = undefined;
+      log("Counter micro-crop was unclear; retrying the safe base crop once.", "warn");
+      response = await captureOcr("counter", profile, {
+        workClass: "counter",
+        generation
+      });
+      if (!response.usedMicro && response.microRect && response.blocksMined !== undefined) {
+        counterMicroCrop = { key: response.calibrationKey, rect: response.microRect };
+      }
+    }
+
+    const value = response.blocksMined;
+    if (value === undefined) return undefined;
+    if (lastCounter && value < lastCounter.value) {
+      log(`Rejected counter OCR ${value.toLocaleString()} because Blocks mined cannot decrease from ${lastCounter.value.toLocaleString()} on the same connected island.`, "warn");
+      return undefined;
+    }
+
+    lastAcceptedCounterGeneration = generation;
+    lastAcceptedCounterCaptureAt = response.captureAt;
+    if (activeOcrProfile !== profile) {
+      activeOcrProfile = profile;
+      boostMicroCrop = undefined;
+    }
+    counterMisses = 0;
+    updateCounter(value, response.captureAt);
+    return value;
+  };
+
+  try {
+    const initialView = await viewport();
+    let profiles = orderedProfiles(initialView);
+    let value = await attempt(profiles[0]);
+    if (value !== undefined) return value;
+
+    counterMisses += 1;
+    if (counterMisses < 2) return undefined;
+
+    invalidateViewportCache();
+    const refreshedView = await viewport(true);
+    profiles = orderedProfiles(refreshedView);
+    for (const profile of profiles.slice(0, 3)) {
+      value = await attempt(profile, true);
+      if (value !== undefined) {
+        log(`Counter crop automatically recalibrated to ${profile}.`);
+        return value;
+      }
+    }
+
+    counterMisses = 0;
+    log("Counter OCR missed all safe crops; no full-panel OCR was forced while mining.", "warn");
+    return undefined;
+  } catch (error) {
+    if (error instanceof OcrDeadlineError) return undefined;
+    throw error;
+  }
 }
 
-async function readBoost(): Promise<SkillStateSnapshot> {
-  const view = await viewport();
-  const profiles = orderedProfiles(view);
-  let response = await captureOcr("boost", profiles[0]);
-  lastBoostCaptureAt = response.captureAt;
-  let skill = response.choppingSkill || { state: "unknown" as const };
-  if (skill.state !== "unknown") {
+async function readBoost(workClass: OcrWorkClass = "boost-sync"): Promise<SkillStateSnapshot> {
+  const generation = ++boostGeneration;
+  const requestedBoostEpoch = boostStateEpoch;
+
+  const attempt = async (profile: OcrCropProfile, forceBase = false): Promise<SkillStateSnapshot> => {
+    const view = await viewport();
+    const key = microCalibrationKey(profile, view);
+    const stored = !forceBase && boostMicroCrop?.key === key ? boostMicroCrop : undefined;
+    let response = await captureOcr("boost", profile, {
+      workClass,
+      generation,
+      boostEpoch: requestedBoostEpoch,
+      microRect: stored?.rect,
+      preferFast: workClass === "boost-critical"
+    });
+
+    if (response.recognitionMethod === "fast-template") fastBoostHits += 1;
+    if (response.boostEpoch !== boostStateEpoch || isStaleObservation(
+      { connectionEpoch: response.connectionEpoch, generation: response.generation, captureAt: response.captureAt },
+      connectionEpoch,
+      lastAcceptedBoostGeneration,
+      lastAcceptedBoostCaptureAt
+    )) {
+      log("Discarded a stale Chopping OCR result instead of letting it overwrite newer state.");
+      return { state: "unknown", raw: "stale observation discarded" };
+    }
+
+    let skill = response.choppingSkill || { state: "unknown" as const };
+    if (!response.usedMicro && response.microRect && skill.state !== "unknown") {
+      boostMicroCrop = { key: response.calibrationKey, rect: response.microRect };
+      log("Chopping micro-crop calibrated from Tesseract word geometry.");
+    }
+
+    if (response.usedMicro && skill.state === "unknown") {
+      boostMicroCrop = undefined;
+      log("Chopping micro-crop was unclear; retrying the safe Chopping crop once.", "warn");
+      response = await captureOcr("boost", profile, {
+        workClass,
+        generation,
+        boostEpoch: requestedBoostEpoch
+      });
+      skill = response.choppingSkill || { state: "unknown" as const };
+      if (!response.usedMicro && response.microRect && skill.state !== "unknown") {
+        boostMicroCrop = { key: response.calibrationKey, rect: response.microRect };
+      }
+    }
+
+    if (skill.state === "unknown") return skill;
+
+    const verdict = transitionVerdict({
+      previous: choppingSkill,
+      observed: skill,
+      captureAt: response.captureAt,
+      predictedReadyAt,
+      boostCycleActive: Boolean(boostCycle)
+    });
+
+    lastAcceptedBoostGeneration = generation;
+    lastAcceptedBoostCaptureAt = response.captureAt;
+    lastBoostCaptureAt = response.captureAt;
+
+    if (verdict === "confirm" && (skill.state === "ready" || skill.state === "active")) {
+      if (pendingTransitionConfirm?.state === skill.state && response.captureAt - pendingTransitionConfirm.captureAt <= 2_000) {
+        log(`Unexpected ${skill.state} transition confirmed by a second fresh read; accepting it.`);
+        pendingTransitionConfirm = undefined;
+        quickTransitionConfirm = false;
+      } else {
+        pendingTransitionConfirm = { state: skill.state, captureAt: response.captureAt };
+        quickTransitionConfirm = true;
+        log(`Unexpected early ${skill.state} reading; requiring one rapid confirmation before any action.`, "warn");
+        return { state: "unknown", raw: `pending ${skill.state} confirmation` };
+      }
+    } else {
+      pendingTransitionConfirm = undefined;
+      quickTransitionConfirm = false;
+    }
+
+    if (activeOcrProfile !== profile) {
+      activeOcrProfile = profile;
+      counterMicroCrop = undefined;
+    }
     boostMisses = 0;
     applyBoostObservation(skill, response.captureAt);
     return skill;
-  }
+  };
 
-  boostMisses += 1;
-  // Bootstrap reliability: one unknown Chopping read immediately tries the
-  // alternate calibrated crops instead of leaving Auto Boost idle.
-  if (boostMisses >= 1) {
-    for (const profile of profiles.slice(1, 3)) {
-      response = await captureOcr("boost", profile);
-      skill = response.choppingSkill || { state: "unknown" as const };
+  try {
+    const initialView = await viewport();
+    let profiles = orderedProfiles(initialView);
+    let skill = await attempt(profiles[0]);
+    if (skill.state !== "unknown") return skill;
+
+    boostMisses += 1;
+    invalidateViewportCache();
+    const refreshedView = await viewport(true);
+    profiles = orderedProfiles(refreshedView);
+    for (const profile of profiles.slice(0, 3)) {
+      skill = await attempt(profile, true);
       if (skill.state !== "unknown") {
-        activeOcrProfile = profile;
-        boostMisses = 0;
-        lastBoostCaptureAt = response.captureAt;
-        applyBoostObservation(skill, response.captureAt);
         log(`Boost crop automatically recalibrated to ${profile}.`);
         return skill;
       }
     }
 
-    // Low-overhead mode deliberately does not escalate an unclear boost crop
-    // into full-sidebar OCR while mining. Keep the action fail-closed and retry
-    // later; explicit Recalibrate OCR remains available if the layout changed.
-    skill = { state: "unknown" as const };
     boostMisses = 0;
-    log("Chopping OCR unclear across the small boost crops; no E sent and no full-panel OCR forced.", "warn");
+    log("Chopping OCR unclear across safe crops; no E sent and no full-panel OCR forced.", "warn");
+    return { state: "unknown" };
+  } catch (error) {
+    if (error instanceof OcrDeadlineError) return { state: "unknown", raw: "expired OCR work dropped" };
+    throw error;
   }
-
-  applyBoostObservation(skill, lastBoostCaptureAt || Date.now());
-  return skill;
 }
 
 function applyBoostObservation(skill: SkillStateSnapshot, captureAt: number) {
@@ -371,33 +633,45 @@ function applyBoostObservation(skill: SkillStateSnapshot, captureAt: number) {
       const predictedSeconds = Math.max(0, Math.ceil((previousPrediction - captureAt) / 1000));
       if (Math.abs(drift) > 6) {
         boostDriftSeconds = drift;
+        cooldownUncertaintySec = Math.min(10, Math.max(cooldownUncertaintySec, Math.abs(drift)));
         log(`Suspicious cooldown OCR: screen ${skill.cooldownSeconds}s vs predicted ${predictedSeconds}s (${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s). Keeping the prior prediction.`, "warn");
         setChoppingSkill({ state: "cooldown", cooldownSeconds: predictedSeconds, raw: skill.raw });
         return;
       }
       boostDriftSeconds = drift;
+      cooldownUncertaintySec = Math.max(0.5, Math.min(8, cooldownUncertaintySec * 0.6 + Math.abs(drift) * 0.8));
       if (Math.abs(drift) >= 0.5) log(`Cooldown sync: screen ${skill.cooldownSeconds}s · drift ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s → resynced.`);
     } else {
       boostDriftSeconds = undefined;
+      cooldownUncertaintySec = 2;
     }
     predictedReadyAt = observedReadyAt;
     boostCooldownReadyAt = observedReadyAt;
   } else if (skill.state === "ready") {
-    if (previousPrediction !== undefined) boostDriftSeconds = (captureAt - previousPrediction) / 1000;
+    if (previousPrediction !== undefined) {
+      boostDriftSeconds = (captureAt - previousPrediction) / 1000;
+      cooldownUncertaintySec = Math.max(0.5, Math.min(8, Math.abs(boostDriftSeconds)));
+    }
     predictedReadyAt = captureAt;
     boostCooldownReadyAt = captureAt;
   } else if (skill.state === "active") {
     predictedReadyAt = undefined;
     boostCooldownReadyAt = undefined;
     boostDriftSeconds = undefined;
+    cooldownUncertaintySec = 2;
+    nextCooldownSyncAt = 0;
   }
   setChoppingSkill(skill);
 }
 
-function updateCounter(value: number, sampleAt = Date.now()) {
+function updateCounter(value: number, sampleAt = Date.now()): boolean {
   const now = sampleAt;
   const previous = lastCounter;
-  if (previous && value >= previous.value && now > previous.at) {
+  if (previous && value < previous.value) {
+    log(`Rejected decreasing Blocks mined value ${value.toLocaleString()} < ${previous.value.toLocaleString()}.`, "warn");
+    return false;
+  }
+  if (previous && now > previous.at) {
     const delta = value - previous.value;
     rollingBps = delta / ((now - previous.at) / 1000);
   }
@@ -408,50 +682,33 @@ function updateCounter(value: number, sampleAt = Date.now()) {
     const delta = value - previous.value;
     log(`Blocks mined updated: ${previous.value.toLocaleString()} → ${value.toLocaleString()} (${delta >= 0 ? "+" : ""}${delta}).`);
   }
-}
-
-function clearTimer(handle: number | undefined) {
-  if (handle !== undefined) clearTimeout(handle);
+  return true;
 }
 
 function clearShortTimers() {
-  clearTimer(verifyTimer);
-  clearTimer(activeTimer);
-  clearTimer(recheckTimer);
-  clearTimer(counterTimer);
-  clearTimer(precisionTimer);
-  verifyTimer = undefined;
-  activeTimer = undefined;
-  recheckTimer = undefined;
-  counterTimer = undefined;
-  precisionTimer = undefined;
   precisionWindowActive = false;
+  quickTransitionConfirm = false;
+  pendingTransitionConfirm = undefined;
+  cancelAllBoostWakes();
 }
 
 function scheduleVerify(seconds = settings.verifyAfterPressSec) {
-  clearTimer(verifyTimer);
-  verifyTimer = self.setTimeout(() => void verifyBoostCycle(), seconds * 1000);
+  void scheduleOffscreenWake("boost-verify", Date.now() + seconds * 1000);
 }
 
 function scheduleActiveCheck() {
-  clearTimer(activeTimer);
-  activeTimer = self.setTimeout(() => void activeBoostCheck(), settings.activeCheckSec * 1000);
+  void scheduleOffscreenWake("boost-active", Date.now() + settings.activeCheckSec * 1000);
 }
 
 function scheduleRecheck(seconds = settings.readyRetrySec) {
-  clearTimer(recheckTimer);
-  recheckTimer = self.setTimeout(() => void wakeBoost(), seconds * 1000);
+  const actualSeconds = quickTransitionConfirm ? Math.min(seconds, 0.3) : seconds;
+  quickTransitionConfirm = false;
+  void scheduleOffscreenWake("boost-sync", Date.now() + actualSeconds * 1000);
 }
 
 function scheduleCounter() {
-  // v0.3.3 low-overhead mode: do not run a second background OCR loop.
-  // The open side panel already polls cached status and only triggers a tiny
-  // counter crop when the configured interval is actually due. When the side
-  // panel is closed, no live counter OCR runs; start/end snapshots remain exact.
-  clearTimer(counterTimer);
-  counterTimer = undefined;
-  precisionTimer = undefined;
-  precisionWindowActive = false;
+  // Live counter work remains demand-driven by the side-panel/status path.
+  // There is intentionally no independent background counter OCR loop.
 }
 
 async function keyE() {
@@ -505,6 +762,24 @@ function confirmBoostSuccess() {
   }
 }
 
+function scheduleCooldownMonitoring() {
+  if (!settings.autoBoost || predictedReadyAt === undefined) return;
+  const now = Date.now();
+  const remainingMs = Math.max(0, predictedReadyAt - now);
+  const syncDelayMs = cooldownSyncDelayMs({
+    remainingMs,
+    nominalIntervalSec: settings.cooldownSyncIntervalSec,
+    uncertaintySec: cooldownUncertaintySec
+  });
+  nextCooldownSyncAt = now + syncDelayMs;
+  void scheduleOffscreenWake("boost-sync", nextCooldownSyncAt);
+  const precisionAt = Math.max(now + 50, predictedReadyAt - settings.precisionWindowSec * 1000);
+  void scheduleOffscreenWake("boost-precision", precisionAt);
+  void chrome.alarms.clear(BOOST_WAKE).then(() => {
+    chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt!) });
+  });
+}
+
 function scheduleCooldown(seconds: number) {
   boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
   const captureAt = lastBoostCaptureAt || Date.now();
@@ -514,15 +789,10 @@ function scheduleCooldown(seconds: number) {
   lastCooldownSyncAt = captureAt;
   precisionWindowActive = false;
   setChoppingSkill({ state: "cooldown", cooldownSeconds: seconds, raw: choppingSkill.raw });
-  log(`Cooldown read: ${seconds}s at screenshot time. Tiny Chopping sync every ${settings.cooldownSyncIntervalSec}s; predicted Ready ${new Date(predictedReadyAt).toLocaleTimeString()}.`);
+  log(`Cooldown read: ${seconds}s at screenshot time. Adaptive sync stays at or below ${settings.cooldownSyncIntervalSec}s and tightens near Ready; predicted Ready ${new Date(predictedReadyAt).toLocaleTimeString()}.`);
   boostCycle = undefined;
-  clearTimer(verifyTimer);
-  clearTimer(activeTimer);
-  clearTimer(recheckTimer);
-  clearTimer(precisionTimer);
-  void chrome.alarms.clear(BOOST_WAKE).then(() => {
-    chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt!) });
-  });
+  boostStateEpoch += 1;
+  scheduleCooldownMonitoring();
 }
 
 async function syncCooldown() {
@@ -530,7 +800,7 @@ async function syncCooldown() {
   lastCooldownSyncAt = Date.now();
   const before = predictedReadyAt;
   try {
-    const observed = await readBoost();
+    const observed = await readBoost("boost-sync");
     if (observed.state === "ready") {
       log("Cooldown sync saw actual Ready. Activating immediately.");
       await beginBoostCycle();
@@ -543,55 +813,70 @@ async function syncCooldown() {
     }
     if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) {
       const adjustment = predictedReadyAt === undefined ? 0 : (predictedReadyAt - before) / 1000;
-      log(`15s Chopping sync: screen ${observed.cooldownSeconds}s${Math.abs(adjustment) >= 0.05 ? ` · adjusted ${adjustment >= 0 ? "+" : ""}${adjustment.toFixed(2)}s` : " · matched prediction"}.`);
+      log(`Chopping sync: screen ${observed.cooldownSeconds}s${Math.abs(adjustment) >= 0.05 ? ` · adjusted ${adjustment >= 0 ? "+" : ""}${adjustment.toFixed(2)}s` : " · matched prediction"}.`);
+      scheduleCooldownMonitoring();
+      return;
     }
+    if (quickTransitionConfirm) {
+      scheduleRecheck(0.3);
+      return;
+    }
+    scheduleCooldownMonitoring();
   } catch (error) {
-    log(`15s Chopping sync failed: ${errorText(error)}. Keeping the last good prediction.`, "warn");
+    log(`Chopping sync failed: ${errorText(error)}. Keeping the last good prediction.`, "warn");
+    scheduleCooldownMonitoring();
   }
 }
 
 function enterPrecisionWindow() {
   if (precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault) return;
   precisionWindowActive = true;
-  clearTimer(precisionTimer);
   const remaining = predictedReadyAt ? Math.max(0, (predictedReadyAt - Date.now()) / 1000) : 0;
   log(`Precision window started at ${remaining.toFixed(2)}s predicted remaining. Blocks counter OCR is paused.`);
-  const tick = async () => {
-    if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle) return;
-    try {
-      const observed = await readBoost();
-      if (observed.state === "ready") {
-        precisionWindowActive = false;
-        const finishedAt = Date.now();
-        log(`Actual Ready confirmed. Recognition finished ${Math.max(0, finishedAt - (lastBoostCaptureAt || finishedAt))}ms after screenshot capture.`);
-        await beginBoostCycle();
-        return;
-      }
-      if (observed.state === "active") {
-        precisionWindowActive = false;
-        scheduleActiveCheck();
-        return;
-      }
-      if (observed.state === "cooldown" && predictedReadyAt !== undefined) {
-        const left = predictedReadyAt - Date.now();
-        if (left > settings.precisionWindowSec * 1000 + 1000) {
-          precisionWindowActive = false;
-          log("Precision window moved back after cooldown re-sync; returning to low-overhead monitoring.");
-          return;
-        }
-      }
-    } catch (error) {
-      log(`Precision Chopping OCR: ${errorText(error)}`, "warn");
+  void scheduleOffscreenWake("boost-precision", Date.now() + 50);
+}
+
+async function precisionBoostTick() {
+  if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle) return;
+  try {
+    const observed = await readBoost("boost-critical");
+    if (observed.state === "ready") {
+      precisionWindowActive = false;
+      const finishedAt = Date.now();
+      log(`Actual Ready confirmed. Recognition finished ${Math.max(0, finishedAt - (lastBoostCaptureAt || finishedAt))}ms after screenshot capture.`);
+      await beginBoostCycle();
+      return;
     }
-    precisionTimer = self.setTimeout(() => void tick(), 450);
-  };
-  precisionTimer = self.setTimeout(() => void tick(), 50);
+    if (observed.state === "active") {
+      precisionWindowActive = false;
+      scheduleActiveCheck();
+      return;
+    }
+    if (observed.state === "cooldown" && predictedReadyAt !== undefined) {
+      const left = predictedReadyAt - Date.now();
+      if (left > settings.precisionWindowSec * 1000 + 1000) {
+        precisionWindowActive = false;
+        log("Precision window moved back after cooldown re-sync; returning to low-overhead monitoring.");
+        scheduleCooldownMonitoring();
+        return;
+      }
+    }
+  } catch (error) {
+    log(`Precision Chopping OCR: ${errorText(error)}`, "warn");
+  }
+  if (precisionWindowActive) void scheduleOffscreenWake("boost-precision", Date.now() + 300);
 }
 
 async function beginBoostCycle() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined || boostCycle) return;
   boostCycle = { retryUsed: false, confirmed: false, ambiguousReads: 0, readyConfirmReads: 0 };
   try {
+    boostStateEpoch += 1;
+    pendingTransitionConfirm = undefined;
+    quickTransitionConfirm = false;
+    precisionWindowActive = false;
+    void cancelOffscreenWake("boost-sync");
+    void cancelOffscreenWake("boost-precision");
     const readyAt = Date.now();
     log(`Chopping Ready confirmed. Starting primary E ×5 activation burst${lastBoostCaptureAt ? ` (${Math.max(0, readyAt - lastBoostCaptureAt)}ms after Ready screenshot)` : ""}.`);
     await pressEBurst(5, "Primary boost input");
@@ -608,7 +893,7 @@ async function beginBoostCycle() {
 async function verifyBoostCycle() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined || !boostCycle) return;
   try {
-    const observed = await readBoost();
+    const observed = await readBoost("boost-critical");
     if (observed.state === "active") {
       confirmBoostSuccess();
       boostCycle = undefined;
@@ -646,8 +931,7 @@ async function verifyBoostCycle() {
     boostCycle.ambiguousReads += 1;
     const wait = boostCycle.ambiguousReads <= 2 ? 1 : settings.readyRetrySec;
     log(`Chopping OCR unclear (${boostCycle.ambiguousReads}); no key sent. Rechecking in ${wait}s.`, "warn");
-    clearTimer(verifyTimer);
-    verifyTimer = self.setTimeout(() => void verifyBoostCycle(), wait * 1000);
+    scheduleVerify(quickTransitionConfirm ? Math.min(wait, 0.3) : wait);
   } catch (error) {
     log(`Boost verify: ${errorText(error)}`, "warn");
     if (boostCycle) scheduleVerify(settings.readyRetrySec);
@@ -657,7 +941,7 @@ async function verifyBoostCycle() {
 async function activeBoostCheck() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined) return;
   try {
-    const observed = await readBoost();
+    const observed = await readBoost("boost-sync");
     if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) {
       scheduleCooldown(observed.cooldownSeconds);
       return;
@@ -680,7 +964,7 @@ async function activeBoostCheck() {
 async function wakeBoost() {
   if (!settings.autoBoost || boostFault || connectedTabId === undefined) return;
   try {
-    const observed = await readBoost();
+    const observed = await readBoost("boost-critical");
     if (observed.state === "ready") {
       await beginBoostCycle();
       return;
@@ -704,8 +988,13 @@ async function wakeBoost() {
 async function maybeArmBoostFromSnapshot() {
   if (!settings.autoBoost || boostFault || boostCycle || connectedTabId === undefined) return;
   const observed = choppingSkill;
-  if (observed.state === "ready") await beginBoostCycle();
-  else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
+  if (observed.state === "ready") {
+    const fresh = await readBoost("boost-critical");
+    if (fresh.state === "ready") await beginBoostCycle();
+    else if (fresh.state === "cooldown" && fresh.cooldownSeconds !== undefined) scheduleCooldown(fresh.cooldownSeconds);
+    else if (fresh.state === "active") scheduleActiveCheck();
+    else scheduleRecheck();
+  } else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
   else if (observed.state === "active") scheduleActiveCheck();
   else {
     log(`Auto Boost waiting for a clear Chopping state; rechecking in ${settings.readyRetrySec}s.`, "warn");
@@ -731,17 +1020,17 @@ async function refreshLiveStateOnPoll() {
         enterPrecisionWindow();
         return;
       }
-      if (now - lastCooldownSyncAt >= settings.cooldownSyncIntervalSec * 1000) {
+      if (nextCooldownSyncAt > 0 && now >= nextCooldownSyncAt) {
         await syncCooldown();
         return;
       }
     }
 
     let boostReadRan = false;
-    if (settings.autoBoost && !boostFault && !boostCycle && !synchronizedCooldown && now - lastBoostReadAt >= 2000) {
+    if (settings.autoBoost && !boostFault && !boostCycle && !synchronizedCooldown && now - lastBoostReadAt >= 2500) {
       boostReadRan = true;
       try {
-        const observed = await readBoost();
+        const observed = await readBoost("boost-sync");
         if (observed.state === "ready") await beginBoostCycle();
         else if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) scheduleCooldown(observed.cooldownSeconds);
         else if (observed.state === "active") scheduleActiveCheck();
@@ -780,6 +1069,8 @@ async function disconnect(reason = "Disconnected") {
   const tabId = connectedTabId;
   clearShortTimers();
   void chrome.alarms.clear(BOOST_WAKE);
+  connectionEpoch += 1;
+  boostStateEpoch += 1;
   connectedTabId = undefined;
   connectedUrl = undefined;
   currentSnapshot = undefined;
@@ -789,6 +1080,16 @@ async function disconnect(reason = "Disconnected") {
   boostCycle = undefined;
   activeOcrProfile = undefined;
   lastViewport = undefined;
+  viewportCheckedAt = 0;
+  invalidateMicroCrops();
+  lastAcceptedCounterGeneration = 0;
+  lastAcceptedBoostGeneration = 0;
+  lastAcceptedCounterCaptureAt = 0;
+  lastAcceptedBoostCaptureAt = 0;
+  cooldownUncertaintySec = 2;
+  nextCooldownSyncAt = 0;
+  pendingTransitionConfirm = undefined;
+  quickTransitionConfirm = false;
   counterMisses = 0;
   boostMisses = 0;
   lastCounterReadAt = 0;
@@ -844,6 +1145,10 @@ async function doConnect(tabId: number) {
   if (connectedTabId !== undefined) await disconnect("Switching One Block tab.");
 
   await attachOrRecover(tabId);
+  connectionEpoch += 1;
+  boostStateEpoch += 1;
+  invalidateViewportCache();
+  invalidateMicroCrops();
   connectedTabId = tabId;
   connectedUrl = tab.url;
   boostFault = undefined;
@@ -863,7 +1168,6 @@ async function doConnect(tabId: number) {
 
   scheduleCounter();
   await maybeArmBoostFromSnapshot();
-  if (settings.mode === "dumb") armDumbMode();
   if (settings.mode === "dumb") armDumbMode();
 }
 
@@ -948,7 +1252,7 @@ async function startSession(miningType: "active" | "afk", preset?: { snapshot: S
 
   activeSession = {
     id: crypto.randomUUID(),
-    startedAtMs: preset?.startedAtMs || Date.now(),
+    startedAtMs: preset?.startedAtMs ?? (Number.isFinite(new Date(snapshot.capturedAt).getTime()) ? new Date(snapshot.capturedAt).getTime() : Date.now()),
     miningType,
     startSnapshot: snapshot,
     connectionMode: settings.mode,
@@ -1013,7 +1317,8 @@ async function stopSession(): Promise<MiningSession> {
     throw new Error("End counter is not greater than the start counter. The run remains active; retry the final read.");
   }
 
-  const endedAt = Date.now();
+  const capturedEndAt = new Date(endSnapshot.capturedAt).getTime();
+  const endedAt = Number.isFinite(capturedEndAt) ? capturedEndAt : Date.now();
   const durationMs = endedAt - activeSession.startedAtMs;
   const blocksMined = endCounter - startCounter;
   const boostStats = {
@@ -1092,6 +1397,10 @@ function status(): LiveExtensionStatus {
     lastBoostCaptureAt,
     boostDriftSeconds,
     dumbModeArmed,
+    ocrQueueDepth: ocrQueue.depth,
+    fastBoostHits,
+    boostMicroCalibrated: Boolean(boostMicroCrop),
+    counterMicroCalibrated: Boolean(counterMicroCrop),
     settings,
     currentSnapshot: liveSnapshot,
     diagnostics
@@ -1112,12 +1421,8 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
   if (!settings.autoBoost) {
     boostFault = undefined;
     boostCycle = undefined;
-    clearTimer(verifyTimer);
-    clearTimer(activeTimer);
-    clearTimer(recheckTimer);
-    verifyTimer = undefined;
-    activeTimer = undefined;
-    recheckTimer = undefined;
+    clearShortTimers();
+    boostStateEpoch += 1;
     void chrome.alarms.clear(BOOST_WAKE);
     boostCooldownReadyAt = undefined;
     boostWakeAt = undefined;
@@ -1127,7 +1432,7 @@ async function setSettings(patch: Partial<ExtensionSettings>) {
     boostFault = undefined;
     if (connectedTabId !== undefined) {
       try {
-        setChoppingSkill(await readBoost());
+        setChoppingSkill(await readBoost("boost-critical"));
       } catch (error) {
         log(`Initial boost read: ${errorText(error)}`, "warn");
       }
@@ -1158,9 +1463,20 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
         return { ok: true, status: status() };
       case "RECALIBRATE_OCR":
         if (connectedTabId === undefined) throw new Error("No One Block tab is connected.");
+        connectionEpoch += 1;
+        boostStateEpoch += 1;
         activeOcrProfile = undefined;
+        invalidateViewportCache();
+        invalidateMicroCrops();
+        lastAcceptedCounterGeneration = 0;
+        lastAcceptedBoostGeneration = 0;
+        lastAcceptedCounterCaptureAt = 0;
+        lastAcceptedBoostCaptureAt = 0;
         counterMisses = 0;
         boostMisses = 0;
+        if (await chrome.offscreen.hasDocument()) {
+          try { await chrome.runtime.sendMessage({ target: "offscreen", type: "RESET_CALIBRATION" } satisfies OffscreenControlRequest); } catch { /* next OCR recreates calibration */ }
+        }
         await readFullSnapshot(true);
         return { ok: true, status: status() };
       case "SCAN_NOW":
@@ -1185,15 +1501,29 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
       case "CLEAR_BOOST_FAULT":
         boostFault = undefined;
         boostCycle = undefined;
+        boostStateEpoch += 1;
         if (settings.autoBoost && connectedTabId !== undefined) {
-          setChoppingSkill(await readBoost());
+          setChoppingSkill(await readBoost("boost-critical"));
           await maybeArmBoostFromSnapshot();
+        }
+        return { ok: true, status: status() };
+      case "OFFSCREEN_WAKE":
+        if (!settings.autoBoost || connectedTabId === undefined || boostFault) return { ok: true, status: status() };
+        if (command.id === "boost-precision") {
+          if (!precisionWindowActive) enterPrecisionWindow();
+          else await precisionBoostTick();
+        } else if (command.id === "boost-verify") {
+          await verifyBoostCycle();
+        } else if (command.id === "boost-active") {
+          await activeBoostCheck();
+        } else if (predictedReadyAt !== undefined && choppingSkill.state === "cooldown") {
+          await syncCooldown();
+        } else {
+          await wakeBoost();
         }
         return { ok: true, status: status() };
       case "EMERGENCY_STOP":
         settings = { ...settings, mode: "manual", manualEnabled: false, autoBoost: false };
-        precisionWindowActive = false;
-        dumbModeArmed = false;
         precisionWindowActive = false;
         dumbModeArmed = false;
         await saveSettings();
@@ -1260,10 +1590,14 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   if (connectedTabId !== tabId) return;
+  connectionEpoch += 1;
+  boostStateEpoch += 1;
   connectedTabId = undefined;
   connectedUrl = undefined;
   activeOcrProfile = undefined;
   lastViewport = undefined;
+  viewportCheckedAt = 0;
+  invalidateMicroCrops();
   clearShortTimers();
   void chrome.alarms.clear(BOOST_WAKE);
   log("Connected One Block tab closed.", "warn");
@@ -1274,10 +1608,14 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId !== connectedTabId) return;
+  connectionEpoch += 1;
+  boostStateEpoch += 1;
   connectedTabId = undefined;
   connectedUrl = undefined;
   activeOcrProfile = undefined;
   lastViewport = undefined;
+  viewportCheckedAt = 0;
+  invalidateMicroCrops();
   clearShortTimers();
   void chrome.alarms.clear(BOOST_WAKE);
   log(`Debugger detached (${reason}).`, "warn");
