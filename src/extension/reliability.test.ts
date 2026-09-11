@@ -100,20 +100,22 @@ describe("cooldownSyncDelayMs", () => {
 });
 
 describe("precisionProbePlan", () => {
-  it("uses cheap learned probes only when the matcher is actually trained", () => {
-    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true, fastRecognizerReady: true }))
+  it("uses fast-only probes only while there is still room before the final authoritative boundary", () => {
+    expect(precisionProbePlan({ remainingMs: 4_000, hasMicroCrop: true, fastRecognizerReady: true }))
       .toEqual({ fastOnly: true, nextDelayMs: 350 });
-    expect(precisionProbePlan({ remainingMs: 700, hasMicroCrop: true, fastRecognizerReady: true }))
-      .toEqual({ fastOnly: true, nextDelayMs: 150 });
+    expect(precisionProbePlan({ remainingMs: 2_000, hasMicroCrop: true, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: true, nextDelayMs: 200 });
+    expect(precisionProbePlan({ remainingMs: 1_500, hasMicroCrop: true, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: false, nextDelayMs: 550 });
     expect(precisionProbePlan({ remainingMs: 100, hasMicroCrop: true, fastRecognizerReady: true }))
-      .toEqual({ fastOnly: true, nextDelayMs: 120 });
+      .toEqual({ fastOnly: false, nextDelayMs: 550 });
   });
 
   it("does not schedule guaranteed fast-only misses before both templates exist", () => {
     expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true, fastRecognizerReady: false }))
       .toEqual({ fastOnly: false, nextDelayMs: 900 });
     expect(precisionProbePlan({ remainingMs: 500, hasMicroCrop: true, fastRecognizerReady: false }))
-      .toEqual({ fastOnly: false, nextDelayMs: 700 });
+      .toEqual({ fastOnly: false, nextDelayMs: 550 });
     expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: false, fastRecognizerReady: true }))
       .toEqual({ fastOnly: false, nextDelayMs: 900 });
   });
