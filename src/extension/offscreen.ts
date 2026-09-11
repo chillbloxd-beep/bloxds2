@@ -1,8 +1,18 @@
 import { createWorker, OEM, PSM, type Worker } from "tesseract.js";
-import { parseBlocksMined, parseChoppingFromText, parseSidebarText } from "./parser";
+import {
+  findBoostStateRect,
+  findCounterValueRect,
+  normalizedCorrelation,
+  parseHocrWords,
+  type RelativeOcrRect
+} from "./ocrCalibration";
+import { parseBlocksMined, parseChoppingFromText, parseSidebarText, parseSkillState } from "./parser";
 import type { OcrMode, OcrRequest, OcrResponse } from "./types";
 
 let workerPromise: Promise<Worker> | null = null;
+let calibrationKey = "";
+let readyTemplates: number[][] = [];
+let activeTemplates: number[][] = [];
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -26,6 +36,17 @@ async function resetWorker() {
   } catch {
     // A failed worker is already unusable. Clearing workerPromise is enough.
   }
+}
+
+function resetCalibration(nextKey = "") {
+  calibrationKey = nextKey;
+  readyTemplates = [];
+  activeTemplates = [];
+}
+
+function ensureCalibrationKey(nextKey?: string) {
+  const normalized = nextKey || "default";
+  if (normalized !== calibrationKey) resetCalibration(normalized);
 }
 
 async function getWorker(): Promise<Worker> {
@@ -62,11 +83,13 @@ async function imageElement(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-async function preprocess(dataUrl: string, mode: OcrMode): Promise<HTMLCanvasElement> {
+async function preprocess(dataUrl: string, mode: OcrMode, micro: boolean): Promise<HTMLCanvasElement> {
   const image = await imageElement(dataUrl);
-  // The live counter/boost crops contain smaller text, so they get more
-  // enlargement than the complete sidebar snapshot.
-  const multiplier = mode === "full" ? 1.85 : 2.55;
+  // Full and base crops favour recognition robustness. Once a micro-crop is
+  // calibrated, less enlargement is needed and the recognition job is much
+  // smaller. We keep smoothing for reliability rather than chasing a risky
+  // preprocessing speed win without live measurements.
+  const multiplier = mode === "full" ? 1.85 : micro ? 2.0 : 2.3;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(image.naturalWidth * multiplier));
   canvas.height = Math.max(1, Math.round(image.naturalHeight * multiplier));
@@ -82,21 +105,134 @@ async function preprocess(dataUrl: string, mode: OcrMode): Promise<HTMLCanvasEle
   return canvas;
 }
 
+function cropCanvas(source: HTMLCanvasElement, rect: RelativeOcrRect): HTMLCanvasElement {
+  const sx = Math.max(0, Math.min(source.width - 1, Math.round(rect.x * source.width)));
+  const sy = Math.max(0, Math.min(source.height - 1, Math.round(rect.y * source.height)));
+  const sw = Math.max(1, Math.min(source.width - sx, Math.round(rect.width * source.width)));
+  const sh = Math.max(1, Math.min(source.height - sy, Math.round(rect.height * source.height)));
+  const canvas = document.createElement("canvas");
+  canvas.width = sw;
+  canvas.height = sh;
+  const context = canvas.getContext("2d", { willReadFrequently: false });
+  if (!context) throw new Error("Canvas is unavailable for calibrated OCR cropping.");
+  context.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+  return canvas;
+}
+
+function imageSignature(source: HTMLCanvasElement): number[] {
+  const width = 36;
+  const height = 14;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return [];
+  context.imageSmoothingEnabled = true;
+  context.drawImage(source, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const values: number[] = [];
+  for (let index = 0; index < pixels.length; index += 4) {
+    values.push((pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114) / 255);
+  }
+  return values;
+}
+
+function rememberTemplate(label: "ready" | "active", signature: number[]) {
+  if (!signature.length) return;
+  const target = label === "ready" ? readyTemplates : activeTemplates;
+  if (target.some(existing => normalizedCorrelation(existing, signature) >= 0.995)) return;
+  target.push(signature);
+  if (target.length > 4) target.shift();
+}
+
+function fastBoostMatch(canvas: HTMLCanvasElement): { label: "ready" | "active"; score: number } | undefined {
+  const signature = imageSignature(canvas);
+  if (!signature.length) return undefined;
+  const bestReady = readyTemplates.reduce((best, item) => Math.max(best, normalizedCorrelation(item, signature)), -1);
+  const bestActive = activeTemplates.reduce((best, item) => Math.max(best, normalizedCorrelation(item, signature)), -1);
+  const best = Math.max(bestReady, bestActive);
+  const second = Math.min(bestReady, bestActive);
+
+  // Conservative by design: a fast match is only accepted when it is almost
+  // identical to a previously Tesseract-confirmed state and clearly separated
+  // from the other label. Anything less falls back to Tesseract.
+  if (best < 0.985 || best - second < 0.03) return undefined;
+  return { label: bestReady > bestActive ? "ready" : "active", score: best };
+}
+
+function parseCounterValue(text: string): number | undefined {
+  const digits = text.replace(/[Oo]/g, "0").replace(/[Il|]/g, "1").replace(/[^0-9]/g, "");
+  if (!digits) return undefined;
+  const value = Number(digits);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+async function setRecognitionParameters(worker: Worker, mode: OcrMode, micro: boolean) {
+  if (mode === "full") {
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+      preserve_interword_spaces: "1",
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:.,%|_-/()[] "
+    });
+    return;
+  }
+
+  if (micro && mode === "counter") {
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.SINGLE_WORD,
+      preserve_interword_spaces: "0",
+      tessedit_char_whitelist: "0123456789OoIl|,"
+    });
+    return;
+  }
+
+  if (micro && mode === "boost") {
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.SINGLE_WORD,
+      preserve_interword_spaces: "0",
+      tessedit_char_whitelist: "ReadyACTIVEactive0123456789sSOoIl|"
+    });
+    return;
+  }
+
+  await worker.setParameters({
+    tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+    preserve_interword_spaces: "1",
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:.,%|_-/ "
+  });
+}
+
 async function recognize(request: OcrRequest): Promise<OcrResponse> {
   const started = performance.now();
-  const canvas = await preprocess(request.imageDataUrl, request.mode);
+  ensureCalibrationKey(request.calibrationKey);
+  const micro = request.inputScope === "micro";
+  const canvas = await preprocess(request.imageDataUrl, request.mode, micro);
 
   try {
-    const worker = await getWorker();
-    await worker.setParameters({
-      tessedit_pageseg_mode: request.mode === "full" ? PSM.SPARSE_TEXT : PSM.SINGLE_BLOCK,
-      preserve_interword_spaces: "1"
-    });
+    if (request.mode === "boost" && micro && request.preferFast) {
+      const match = fastBoostMatch(canvas);
+      if (match) {
+        const elapsedMs = Math.round(performance.now() - started);
+        return {
+          ok: true,
+          rawText: match.label === "ready" ? "Ready" : "Active",
+          confidence: match.score * 100,
+          elapsedMs,
+          choppingSkill: { state: match.label, raw: match.label === "ready" ? "Ready" : "Active" },
+          recognitionMethod: "fast-template",
+          fastMatchedLabel: match.label
+        };
+      }
+    }
 
-    const result = await worker.recognize(canvas);
+    const worker = await getWorker();
+    await setRecognitionParameters(worker, request.mode, micro);
+    const needsHocr = !micro && request.mode !== "full";
+    const result = await worker.recognize(canvas, {}, needsHocr ? { text: true, hocr: true } : { text: true });
     const rawText = result.data.text || "";
     const confidence = Number.isFinite(result.data.confidence) ? result.data.confidence : undefined;
     const elapsedMs = Math.round(performance.now() - started);
+    const recognitionMethod = micro ? "tesseract-micro" as const : "tesseract-base" as const;
 
     if (request.mode === "full") {
       return {
@@ -104,18 +240,40 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
         rawText,
         confidence,
         elapsedMs,
+        recognitionMethod,
         snapshot: parseSidebarText(rawText, confidence)
       };
     }
 
     if (request.mode === "counter") {
+      const blocksMined = micro ? parseCounterValue(rawText) : parseBlocksMined(rawText);
+      let microRect: RelativeOcrRect | undefined;
+      if (!micro) {
+        const hocr = result.data.hocr;
+        microRect = findCounterValueRect(parseHocrWords(hocr), canvas.width, canvas.height);
+      }
       return {
         ok: true,
         rawText,
         confidence,
         elapsedMs,
-        blocksMined: parseBlocksMined(rawText)
+        recognitionMethod,
+        blocksMined,
+        microRect
       };
+    }
+
+    const choppingSkill = micro ? parseSkillState(rawText) : parseChoppingFromText(rawText);
+    let microRect: RelativeOcrRect | undefined;
+    if (!micro) {
+      const hocr = result.data.hocr;
+      microRect = findBoostStateRect(parseHocrWords(hocr), canvas.width, canvas.height);
+      if (microRect && (choppingSkill.state === "ready" || choppingSkill.state === "active") && (confidence ?? 0) >= 70) {
+        const signatureCanvas = cropCanvas(canvas, microRect);
+        rememberTemplate(choppingSkill.state, imageSignature(signatureCanvas));
+      }
+    } else if ((choppingSkill.state === "ready" || choppingSkill.state === "active") && (confidence ?? 0) >= 70) {
+      rememberTemplate(choppingSkill.state, imageSignature(canvas));
     }
 
     return {
@@ -123,7 +281,9 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
       rawText,
       confidence,
       elapsedMs,
-      choppingSkill: parseChoppingFromText(rawText)
+      recognitionMethod,
+      choppingSkill,
+      microRect
     };
   } catch (error) {
     await resetWorker();
