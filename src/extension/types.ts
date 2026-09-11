@@ -62,6 +62,7 @@ export interface LiveExtensionStatus {
   dumbModeArmed?: boolean;
   ocrQueueDepth?: number;
   fastBoostHits?: number;
+  fastRecognizerReady?: boolean;
   boostMicroCalibrated?: boolean;
   counterMicroCalibrated?: boolean;
   powerState: ExtensionPowerState;
@@ -161,5 +162,7 @@ export interface OcrResponse {
   recognitionMethod?: OcrRecognitionMethod;
   fastAttempted?: boolean;
   fastMatchedLabel?: "ready" | "active";
+  /** True only after Tesseract has taught the local matcher at least one Ready and one Active template. */
+  fastRecognizerReady?: boolean;
   error?: string;
 }

@@ -24,13 +24,14 @@ Lobby IDs are never hard-coded. URL detection is based on `/play/oneBlock`.
 
 - **Manual** — the extension performs no debugger attachment, OCR, or automated input until `Extension enabled` is switched on.
 - **Auto** — the extension detects an open Bloxd One Block tab and connects automatically, regardless of lobby.
+- **Dumb** — Auto connection plus AFK run detection, live counter and Chopping automation.
 - **Emergency stop** — changes back to Manual/Off, disables auto boost and detaches from Bloxd.
 
 ### Local OCR
 
 The extension uses Chrome DevTools Protocol screenshot clipping to capture only small regions of the right-hand One Block panel. The images are transient and processed locally with bundled Tesseract.js/WebAssembly assets. It does not upload screenshots or record video.
 
-A full sidebar read is used at connection, manual refresh, run start and run end. The raw recognized text is retained locally for run snapshots, so information that is visible but not yet parsed is not silently discarded.
+A full sidebar read is used at connection, manual refresh, run start and run end. If the first connection snapshot misses Phase, v0.3.6 performs one connection-time metadata retry; it does not reintroduce periodic full-sidebar OCR. Raw recognized text is retained locally for run snapshots, so information that is visible but not yet parsed is not silently discarded.
 
 The parser currently extracts, when OCR can read them:
 
@@ -49,27 +50,23 @@ Unrecognized/missing fields remain missing; the extension does not invent values
 
 ### Before/after run logging
 
-Extension-recorded runs store:
-
-- exact wall-clock start/end timestamps
-- start/end `Blocks mined`
-- calculated block delta and average blocks/sec
-- complete raw OCR sidebar text before the run
-- complete raw OCR sidebar text after the run
-- parsed before/after sidebar fields
-- lobby at run start
-- Manual/Auto connection mode
-- successful boost activations, activation retries, failed activations and observed cooldown values
+Extension-recorded runs store exact start/end timestamps, start/end `Blocks mined`, calculated block delta and average blocks/sec, complete raw OCR sidebar text before/after the run, parsed before/after sidebar fields, lobby/mode information, and Chopping activation statistics.
 
 The Sessions page exposes the raw before/after sidebar snapshots under **Details**. Raw sidebar snapshots are local-only and are not included in anonymous community submissions.
 
-### Chopping automation and low-overhead runtime
+### Chopping automation and v0.3.6 reliability fixes
 
-The automation targets **Chopping** specifically. A local countdown never authorizes input by itself: only a fresh Chopping `Ready` observation can start the E sequence. The primary activation is E ×5, followed by a fast verification. If `Ready` is observed again, one rapid confirmation is required before the single backup E ×3 burst. Unclear or surprising observations fail closed and send no key.
+The automation targets **Chopping** specifically. A local countdown never authorizes input by itself: only a fresh Chopping `Ready` observation can start the E sequence. The primary activation remains E ×5, followed by verification. If `Ready` is still observed, one additional confirmation is required before the single backup E ×3 burst. Unclear observations fail closed and send no key.
 
-Numeric cooldown observations are anchored to screenshot capture time, not OCR completion time. During a known cooldown the Chopping watcher enters an explicit sleep state between scheduled tiny synchronization reads. Dumb mode uses a nominal 15-second sync interval, tightened only near Ready or when prediction uncertainty is high. Near the predicted transition the counter is paused and the watcher uses a learned Ready/Active micro-state matcher first; uncertain boundary reads fall back to constrained Tesseract. Full-sidebar OCR is not run periodically while mining.
+v0.3.6 is a fix-only release based on failures seen in the v0.3.5 live browser recording. The first numeric cooldown after Active is now provisional and must agree with a second fresh sample before it becomes the trusted Ready prediction. If an established timer later disagrees by more than the normal drift tolerance, one outlier cannot move it, but two fresh outliers that agree with each other can replace the stale prediction. This prevents one bad first OCR value from locking the watcher onto the wrong countdown for an entire cycle.
 
-Expensive capture/OCR work uses a single-concurrency priority queue: critical Chopping reads outrank cooldown sync, live counter analytics and full-panel reads. Old connection/generation/capture results are rejected, decreasing Blocks-mined readings are rejected on the same connected island, and a timeout watchdog can recreate a stuck OCR worker.
+An unexpectedly early real `Ready` still requires confirmation, but the confirmation is scheduled immediately instead of falling back to the normal cooldown cadence. The precision watcher starts slightly ahead of the integer countdown boundary, and once precision owns the transition it cancels the normal cooldown-sync wake so two reads do not collide at the same boundary.
+
+The learned Ready/Active fast path is used in fast-only mode only after Tesseract has confirmed at least one template for **both** states. Until then, precision uses bounded authoritative reads instead of issuing guaranteed fast-template misses. Chopping calibration now keeps a fixed, right-anchored Skill value cell across different token widths such as `149s`, `Ready` and `Active`.
+
+To reduce the renderer disturbance seen in the v0.3.5 recording, one ordinary micro-crop miss no longer immediately launches broad multi-profile recovery. Recovery is staged, while timing-critical precision reads are bounded to the active profile. Full-sidebar OCR is never run periodically while mining.
+
+E dispatch still uses Chrome DevTools Protocol, but v0.3.6 holds each E key-down for 25 ms before key-up rather than issuing an effectively immediate down/up pair. The existing E ×5 / one E ×3 backup safety limits remain unchanged.
 
 ### Counter, sessions and Dumb mode
 
@@ -81,18 +78,21 @@ Dumb mode forces Auto connection, Auto Chopping, the nominal 15-second Chopping 
 
 The Live Monitor is **never opened automatically**. Press **Open Live Monitor** in the side panel to create the compact popup. Closing the side panel or monitor does not stop the automation. The monitor consumes cached/event-driven runtime state and a low-frequency recovery status check; opening it does not create its own Chopping or counter OCR schedule.
 
-Mini mode shows Chopping state, Blocks mined, rolling speed, run progress and health. Monitor mode adds timer drift/uncertainty, last authoritative sync, recognition method, OCR/queue/capture timing, activation statistics and Ready→E1 latency. Diagnostic mode adds local structured logs. Logs are bounded in memory and no screenshots/video are retained.
+Mini mode shows Chopping state, Blocks mined, rolling speed, run progress and health. Monitor mode adds timer drift/uncertainty, last authoritative sync, recognition method, OCR/queue/capture timing, activation statistics and Ready-recognition→E1 latency. Diagnostic mode adds local structured logs. Logs are bounded in memory and no screenshots/video are retained.
 
 ### Performance behavior
 
 - full sidebar OCR: connect/calibration, explicit refresh/recalibration, run start and run end only
 - Chopping cooldown: sleep between scheduled tiny reads; nominal 15-second sync in Dumb mode
-- precision window: counter paused; learned state matching preferred; Tesseract is a guarded fallback rather than a constant sub-second loop
+- first cooldown anchor: two fresh time-consistent samples before trust
+- large timer disagreement: recovery quorum rather than permanent old-prediction lock-in
+- precision window: begins before integer zero, counter paused, normal sync wake cancelled, learned matching preferred
+- micro-crop recovery: one ordinary miss is deferred; broad profile recovery is staged rather than immediate
 - live counter: small crop, default 20 seconds while a run is active
 - UI: side panel and optional monitor display cached/event-driven state; `GET_STATUS` does not itself trigger OCR or connection recovery
 - OCR worker: kept loaded but idle during sleep periods to avoid repeated initialization spikes
 
-The Diagnostics surfaces report structured state-machine, timer, OCR, input, counter and session events. Measured live Chromebook performance and real Ready→E latency still require an actual Bloxd browser run; CI cannot prove those runtime quantities.
+The Diagnostics surfaces report structured state-machine, timer, OCR, input, counter and session events. `Ready recognition → E1` measures extension-internal dispatch latency only; it is not the same as visual Bloxd Ready → E latency.
 
 ## Build
 
@@ -103,6 +103,7 @@ npm install
 npm test
 npm run build
 npm run build:extension
+npm run audit:extension
 ```
 
 The normal website build is written to `dist/`. The Chrome extension build is written to `dist-extension/`.
@@ -121,16 +122,6 @@ The extension requests the `debugger` permission because it uses DevTools Protoc
 
 Every push to `main` also runs **Build Chrome extension** and uploads `oneblock-analytics-extension.zip` as a GitHub Actions artifact. Release ZIPs should be taken from the audited merged-`main` workflow, not from an intermediate feature-branch build.
 
-## GitHub Codespaces
-
-```bash
-npm install
-npm test
-npm run build
-npm run build:extension
-npm run dev -- --host 0.0.0.0
-```
-
 ## Cloudflare / D1 setup
 
 ```bash
@@ -146,8 +137,6 @@ openssl rand -hex 32
 npx wrangler secret put ANON_HASH_SALT
 npm run cf:deploy
 ```
-
-For local Worker testing, copy `.dev.vars.example` to `.dev.vars`, set a development `ANON_HASH_SALT`, run `npm run db:migrate:local`, then `npm run cf:dev`.
 
 Do not configure `TURNSTILE_SECRET_KEY` until a corresponding frontend Turnstile token flow is added.
 
@@ -179,8 +168,8 @@ The current community endpoint analyzes up to the latest 10,000 eligible runs fo
 
 ## Runtime validation still required
 
-CI validates source compilation, parser tests, both production builds and the packaged OCR assets. Two behaviors still require a real Bloxd browser test before they can be called proven: OCR accuracy against the live rendered sidebar at the user's display scale, and whether Bloxd accepts the debugger-dispatched E input exactly as intended.
+CI validates source compilation, deterministic parser/reliability/calibration tests, production builds, the extension audit and packaged OCR assets. It cannot prove the exact rendered Ready→E delay, actual mining/FPS impact, or live OCR accuracy on a particular Chromebook/display scale.
 
-### v0.3.5 reliability / performance release
+### v0.3.6 fix release
 
-v0.3.5 combines the existing Dumb AFK workflow with priority/deadline OCR scheduling, stale-result rejection, self-calibrating micro-crops, conservative learned Ready/Active recognition, adaptive cooldown synchronization, offscreen wake scheduling, explicit sleep states, passive manual Live Monitor support and structured diagnostics. The release is only considered complete after the source/build audit, CI, merged-main package build and real-browser acceptance testing described above.
+v0.3.6 does not add a new user-facing feature set. It targets the v0.3.5 live-test failures: bad first cooldown anchoring, stale-prediction lock-in, delayed early-Ready confirmation, integer-boundary latency, untrained fast-only probing, unstable Chopping micro-crops, overly eager broad fallback, occasional ineffective ultra-short E dispatch, and missing Phase retry at connection. These fixes must still pass a new real Bloxd/Chromebook acceptance recording before their real-world latency and performance impact can be called proven.

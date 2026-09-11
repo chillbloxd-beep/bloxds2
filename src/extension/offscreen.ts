@@ -50,6 +50,10 @@ function ensureCalibrationKey(nextKey?: string) {
   if (normalized !== calibrationKey) resetCalibration(normalized);
 }
 
+function fastRecognizerReady() {
+  return readyTemplates.length > 0 && activeTemplates.length > 0;
+}
+
 async function getWorker(): Promise<Worker> {
   if (!workerPromise) {
     workerPromise = (async () => {
@@ -87,7 +91,7 @@ async function imageElement(dataUrl: string): Promise<HTMLImageElement> {
 async function preprocess(dataUrl: string, mode: OcrMode, micro: boolean): Promise<HTMLCanvasElement> {
   const image = await imageElement(dataUrl);
   // Base crops favour recognition robustness. Micro-crops contain only one
-  // value token and can use less enlargement, reducing both canvas and OCR work.
+  // value cell and can use less enlargement, reducing both canvas and OCR work.
   const multiplier = mode === "full" ? 1.85 : micro ? 2.0 : 2.3;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(image.naturalWidth * multiplier));
@@ -147,7 +151,7 @@ function rememberTemplate(label: "ready" | "active", signature: number[]) {
 function fastBoostMatch(canvas: HTMLCanvasElement): { label: "ready" | "active"; score: number } | undefined {
   // Never classify from a one-sided template set. Until Tesseract has confirmed
   // at least one sample of both labels, the safe path is the Tesseract fallback.
-  if (readyTemplates.length === 0 || activeTemplates.length === 0) return undefined;
+  if (!fastRecognizerReady()) return undefined;
   const signature = imageSignature(canvas);
   if (!signature.length) return undefined;
   const bestReady = readyTemplates.reduce((best, item) => Math.max(best, normalizedCorrelation(item, signature)), -1);
@@ -226,7 +230,8 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
           choppingSkill: { state: match.label, raw: match.label === "ready" ? "Ready" : "Active" },
           recognitionMethod: "fast-template",
           fastAttempted: true,
-          fastMatchedLabel: match.label
+          fastMatchedLabel: match.label,
+          fastRecognizerReady: fastRecognizerReady()
         };
       }
       if (request.fastOnly) {
@@ -235,7 +240,8 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
           rawText: "",
           elapsedMs: Math.round(performance.now() - started),
           choppingSkill: { state: "unknown", raw: "fast template miss" },
-          fastAttempted: true
+          fastAttempted: true,
+          fastRecognizerReady: fastRecognizerReady()
         };
       }
     }
@@ -257,6 +263,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
         elapsedMs,
         recognitionMethod,
         fastAttempted: false,
+        fastRecognizerReady: fastRecognizerReady(),
         snapshot: parseSidebarText(rawText, confidence)
       };
     }
@@ -275,6 +282,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
         elapsedMs,
         recognitionMethod,
         fastAttempted: false,
+        fastRecognizerReady: fastRecognizerReady(),
         blocksMined,
         microRect
       };
@@ -300,6 +308,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
       elapsedMs,
       recognitionMethod,
       fastAttempted: Boolean(request.preferFast),
+      fastRecognizerReady: fastRecognizerReady(),
       choppingSkill,
       microRect
     };

@@ -112,6 +112,27 @@ export function isStaleObservation(
     || stamp.captureAt < lastAcceptedCaptureAt;
 }
 
+export interface CooldownSample {
+  seconds: number;
+  captureAt: number;
+}
+
+export function cooldownReadyEstimateMs(sample: CooldownSample): number {
+  return sample.captureAt + sample.seconds * 1000;
+}
+
+/** Two countdown reads are considered mutually consistent when they predict
+ * essentially the same Ready boundary. This is deliberately based on the
+ * absolute boundary instead of raw displayed seconds, because time elapses
+ * between captures. */
+export function cooldownSamplesAgree(
+  first: CooldownSample,
+  second: CooldownSample,
+  toleranceMs = 2_200
+): boolean {
+  return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) <= toleranceMs;
+}
+
 export type TransitionVerdict = "accept" | "confirm";
 
 /**
@@ -174,20 +195,28 @@ export function cooldownSyncDelayMs(options: {
 }
 
 /**
- * Precision probing avoids repeatedly invoking Tesseract. While the predicted
- * transition is still more than 150 ms away and a learned micro-crop exists,
- * use the cheap template path only. At the transition boundary, allow one
- * authoritative Tesseract fallback and then back off before trying again.
+ * Precision probing avoids repeatedly invoking Tesseract. Fast-only probing is
+ * legal only when the micro crop exists, both Ready/Active templates are known,
+ * and we are still outside the final ~1.5 s boundary. Inside that last boundary
+ * the request remains fast-first, but a template miss is allowed to fall back
+ * to authoritative micro Tesseract instead of waiting until after predicted 0.
  */
 export function precisionProbePlan(options: {
   remainingMs: number;
   hasMicroCrop: boolean;
+  fastRecognizerReady: boolean;
 }): { fastOnly: boolean; nextDelayMs: number } {
   const remainingMs = options.remainingMs;
-  const fastOnly = options.hasMicroCrop && remainingMs > 150;
+  const fastOnly = options.hasMicroCrop && options.fastRecognizerReady && remainingMs > 1_500;
   let nextDelayMs: number;
-  if (remainingMs > 1_000) nextDelayMs = 500;
-  else if (remainingMs > 150) nextDelayMs = 250;
-  else nextDelayMs = 700;
+
+  if (fastOnly) {
+    nextDelayMs = remainingMs > 3_000 ? 350 : 200;
+  } else {
+    // With no trained matcher, or in the final authoritative boundary, keep
+    // reads bounded but frequent enough that a real Ready is not hidden behind
+    // an inaccurate local prediction for multiple seconds.
+    nextDelayMs = remainingMs > 1_500 ? 900 : 550;
+  }
   return { fastOnly, nextDelayMs };
 }
