@@ -49,7 +49,7 @@ jobs:
           rm scripts/apply-v037-final.py
           rm .github/workflows/apply-v037-final.yml
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm install --package-lock=false --no-audit --no-fund
       - name: Unit tests
         run: npm test
       - name: Website typecheck and build
