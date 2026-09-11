@@ -63,42 +63,36 @@ Extension-recorded runs store:
 
 The Sessions page exposes the raw before/after sidebar snapshots under **Details**. Raw sidebar snapshots are local-only and are not included in anonymous community submissions.
 
-### Chopping boost state machine
+### Chopping automation and low-overhead runtime
 
-The automation targets the **Chopping** skill specifically; it does not react to another `Ready` elsewhere on the sidebar.
+The automation targets **Chopping** specifically. A local countdown never authorizes input by itself: only a fresh Chopping `Ready` observation can start the E sequence. The primary activation is E ×5, followed by a fast verification. If `Ready` is observed again, one rapid confirmation is required before the single backup E ×3 burst. Unclear or surprising observations fail closed and send no key.
 
-```text
-Chopping Skill: Ready
-        ↓
-E ×5 primary burst
-        ↓
-wait 3 seconds
-        ↓
-read Chopping status
-```
+Numeric cooldown observations are anchored to screenshot capture time, not OCR completion time. During a known cooldown the Chopping watcher enters an explicit sleep state between scheduled tiny synchronization reads. Dumb mode uses a nominal 15-second sync interval, tightened only near Ready or when prediction uncertainty is high. Near the predicted transition the counter is paused and the watcher uses a learned Ready/Active micro-state matcher first; uncertain boundary reads fall back to constrained Tesseract. Full-sidebar OCR is not run periodically while mining.
 
-After the check:
+Expensive capture/OCR work uses a single-concurrency priority queue: critical Chopping reads outrank cooldown sync, live counter analytics and full-panel reads. Old connection/generation/capture results are rejected, decreasing Blocks-mined readings are rejected on the same connected island, and a timeout watchdog can recreate a stuck OCR worker.
 
-- `Active` = activation confirmed.
-- A number such as `157s` = activation confirmed and cooldown already started.
-- `Ready` = send **one** backup E ×3 burst, then verify again.
-- unclear OCR = send no key and re-read later.
-- still `Ready` after the single backup burst = pause auto boost with an input-not-confirmed fault instead of repeatedly pressing E.
+### Counter, sessions and Dumb mode
 
-When the first countdown value appears, for example `157s`, boost OCR stops for that cooldown. The next boost check is scheduled for `157 + 2` seconds by default. If it is not Ready then, the extension waits 3 seconds before another check. These timings are configurable.
+Live Blocks mined uses a small crop at the configured counter interval (20 seconds by default) while a run is active. It is scheduled independently of the UI, so closing the side panel does not stop an active run or Chopping automation. Counter work is deferred when Chopping is near or inside the precision Ready window. Rolling blocks/second uses screenshot capture timestamps and is displayed to 6 significant figures.
 
-The current packaged build declares Chrome 150+ so its debugger/service-worker and alarm behavior matches the APIs used by the extension as built and tested in CI.
+Dumb mode forces Auto connection, Auto Chopping, the nominal 15-second Chopping synchronization and live counter. Before the run starts, a tiny counter check runs about every two seconds. The first observed increase starts an AFK run from the previous counter sample; stopping remains manual so the user controls the final boundary. Complete right-sidebar OCR snapshots are still captured at run start/end and raw recognized text remains local.
+
+### Optional Live Monitor
+
+The Live Monitor is **never opened automatically**. Press **Open Live Monitor** in the side panel to create the compact popup. Closing the side panel or monitor does not stop the automation. The monitor consumes cached/event-driven runtime state and a low-frequency recovery status check; opening it does not create its own Chopping or counter OCR schedule.
+
+Mini mode shows Chopping state, Blocks mined, rolling speed, run progress and health. Monitor mode adds timer drift/uncertainty, last authoritative sync, recognition method, OCR/queue/capture timing, activation statistics and Ready→E1 latency. Diagnostic mode adds local structured logs. Logs are bounded in memory and no screenshots/video are retained.
 
 ### Performance behavior
 
-- full sidebar OCR: startup, refresh, run start/end only
-- counter OCR: small `Blocks mined` crop, default every 5 seconds while enabled; side-panel status polling also drives recovery if a service-worker timer was suspended
-- boost OCR: only during state transitions and after scheduled cooldown wake-up
-- known cooldown: no repeated boost OCR for every displayed second
-- OCR worker is lazy-loaded on the first read
-- capture is cropped before OCR rather than processing the full game viewport
+- full sidebar OCR: connect/calibration, explicit refresh/recalibration, run start and run end only
+- Chopping cooldown: sleep between scheduled tiny reads; nominal 15-second sync in Dumb mode
+- precision window: counter paused; learned state matching preferred; Tesseract is a guarded fallback rather than a constant sub-second loop
+- live counter: small crop, default 20 seconds while a run is active
+- UI: side panel and optional monitor display cached/event-driven state; `GET_STATUS` does not itself trigger OCR or connection recovery
+- OCR worker: kept loaded but idle during sleep periods to avoid repeated initialization spikes
 
-The Diagnostics section reports the last OCR duration, OCR confidence, reads in the previous minute and recent state-machine events.
+The Diagnostics surfaces report structured state-machine, timer, OCR, input, counter and session events. Measured live Chromebook performance and real Ready→E latency still require an actual Bloxd browser run; CI cannot prove those runtime quantities.
 
 ## Build
 
@@ -125,7 +119,7 @@ Build it, then in Chrome:
 
 The extension requests the `debugger` permission because it uses DevTools Protocol for cropped screen capture and E-key dispatch. Chrome may visibly indicate that the Bloxd tab is being debugged. Automated game input should only be used where permitted by the game's rules.
 
-Every push to `main` also runs **Build Chrome extension** and uploads `oneblock-analytics-extension.zip` as a GitHub Actions artifact.
+Every push to `main` also runs **Build Chrome extension** and uploads `oneblock-analytics-extension.zip` as a GitHub Actions artifact. Release ZIPs should be taken from the audited merged-`main` workflow, not from an intermediate feature-branch build.
 
 ## GitHub Codespaces
 
@@ -187,30 +181,6 @@ The current community endpoint analyzes up to the latest 10,000 eligible runs fo
 
 CI validates source compilation, parser tests, both production builds and the packaged OCR assets. Two behaviors still require a real Bloxd browser test before they can be called proven: OCR accuracy against the live rendered sidebar at the user's display scale, and whether Bloxd accepts the debugger-dispatched E input exactly as intended.
 
-### v0.3.1 Auto Boost bootstrap fix
+### v0.3.5 reliability / performance release
 
-Auto Boost now keeps rechecking when the first Chopping OCR state is unknown instead of remaining idle. The first unknown boost crop immediately tries alternate calibrated crops. E dispatch brings the connected Bloxd target to the front and uses raw key-down input, which is better suited to game keyboard handlers. A **Test E ×2** diagnostic (available while Auto Boost is off) separates OCR/state-detection failures from keyboard-input failures.
-
-
-### v0.3.4 live refresh
-
-The extension side panel polls live state once per second. Counter OCR is due every 5 seconds by default, Chopping is re-read during actionable states, the visible cooldown decrements locally without OCRing every second, and the parsed full sidebar refreshes periodically while the panel is open. A floating Action Log mirrors the newest diagnostics, including each attempted E press.
-
-
-### v0.3.4 low-overhead mining mode
-
-The side panel no longer runs a duplicate background counter OCR loop or periodic full-sidebar OCR while mining. Full sidebar snapshots are limited to connect, run start/end, and explicit refresh/recalibration. Live Blocks mined uses a tiny crop every 20 seconds by default (configurable 10–180 seconds), while Chopping OCR runs only around actionable state transitions and sleeps through known cooldowns. UI status polling reads cached state between OCR events.
-
-
-### v0.3.4 precision Chopping + Dumb mode
-
-Cooldown timing is anchored to screenshot capture time rather than OCR completion. A tiny Chopping-only crop re-synchronizes the displayed cooldown every 15 seconds by default, rejects implausible >6-second jumps, and enters a short precision window near Ready where counter OCR is deferred and Chopping is re-read rapidly. E only fires after a fresh Chopping Ready observation. The first post-E verification is accelerated, with one extra rapid Ready confirmation before the existing backup E ×3 burst. Rolling blocks/second is displayed to 6 significant figures and counter-rate timing uses screenshot capture timestamps.
-
-Dumb mode is a third connection mode. It forces auto connection, Auto Chopping, 15-second cooldown sync and live counter. After connection it arms from the current sidebar snapshot; while no run is active it takes a tiny counter sample about every two seconds. The first observed Blocks mined increase automatically starts an AFK run using the previous counter sample as the run boundary, avoiding a heavy full-panel OCR in the middle of mining. Runs are still stopped manually so the user controls the recording boundary.
-
-
-### v0.3.4 precision Chopping + Dumb mode
-
-Cooldown timing is anchored to screenshot capture time rather than OCR completion. A tiny Chopping-only crop re-synchronizes the displayed cooldown every 15 seconds by default, rejects implausible >6-second jumps, and enters a short precision window near Ready where counter OCR is deferred and Chopping is re-read rapidly. E only fires after a fresh Chopping Ready observation. The first post-E verification is accelerated, with one extra rapid Ready confirmation before the existing backup E ×3 burst. Rolling blocks/second is displayed to 6 significant figures and counter-rate timing uses screenshot capture timestamps.
-
-Dumb mode is a third connection mode. It forces auto connection, Auto Chopping, 15-second cooldown sync and live counter. After connection it arms from the current sidebar snapshot; while no run is active it takes a tiny counter sample about every two seconds. The first observed Blocks mined increase automatically starts an AFK run using the previous counter sample as the run boundary, avoiding a heavy full-panel OCR in the middle of mining. Runs are still stopped manually so the user controls the recording boundary.
+v0.3.5 combines the existing Dumb AFK workflow with priority/deadline OCR scheduling, stale-result rejection, self-calibrating micro-crops, conservative learned Ready/Active recognition, adaptive cooldown synchronization, offscreen wake scheduling, explicit sleep states, passive manual Live Monitor support and structured diagnostics. The release is only considered complete after the source/build audit, CI, merged-main package build and real-browser acceptance testing described above.

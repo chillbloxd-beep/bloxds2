@@ -50,3 +50,8 @@
   .extension-setting-row,.switch-row { align-items:flex-start; }
   .live-connection-bar { align-items:flex-start; }
 }
+
+.live-connection-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+.diagnostic-log .debug { opacity:.68; }
+.diagnostic-log b,.floating-action-log b { text-transform:uppercase; font-size:10px; letter-spacing:.06em; color:var(--muted); }
+.diagnostic-log small { color:var(--muted); }

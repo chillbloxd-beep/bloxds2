@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppSettings, MiningSession, MiningType, SkillStateSnapshot } from "../types";
-import type { BackgroundCommand, BackgroundResponse, ExtensionSettings, LiveExtensionStatus } from "../extension/types";
+import type { BackgroundCommand, BackgroundResponse, ExtensionSettings, LiveExtensionStatus, UiStateMessage } from "../extension/types";
 import { Badge, Metric, PageHead, Section } from "../components/UI";
 import { formatDuration, formatInteger } from "../lib/math";
 
@@ -58,9 +58,15 @@ export function LiveExtension({
 
   useEffect(() => {
     void refresh();
-    const statusTimer = window.setInterval(() => void refresh(), 2000);
+    const listener = (message: unknown) => {
+      const event = message as UiStateMessage;
+      if (event?.target === "ui" && event.type === "STATE_UPDATE") setStatus(event.status);
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    const statusTimer = window.setInterval(() => void refresh(), 15_000);
     const clockTimer = window.setInterval(() => forceClock(value => value + 1), 1000);
     return () => {
+      chrome.runtime.onMessage.removeListener(listener);
       window.clearInterval(statusTimer);
       window.clearInterval(clockTimer);
     };
@@ -118,7 +124,10 @@ export function LiveExtension({
 
     <div className="live-connection-bar">
       <div><span className={`connection-dot ${status.connected ? "online" : ""}`} /><strong>{connectionText}</strong><small>{status.url || "Open https://bloxd.io/play/oneBlock"}</small></div>
-      <button className="quiet-button" disabled={busy} onClick={() => void run(() => command({ target: "background", type: "SCAN_NOW" }))}>Scan now</button>
+      <div className="live-connection-actions">
+        <button className="quiet-button" disabled={busy} onClick={() => void run(() => command({ target: "background", type: "OPEN_MONITOR" }))}>Open Live Monitor</button>
+        <button className="quiet-button" disabled={busy} onClick={() => void run(() => command({ target: "background", type: "SCAN_NOW" }))}>Scan now</button>
+      </div>
     </div>
 
     <Section title="Extension mode">
@@ -195,30 +204,31 @@ export function LiveExtension({
         <label className="field"><span>E burst gap (ms)</span><input type="number" min="75" max="600" step="25" value={settings.doubleTapGapMs} onChange={event => void patch({ doubleTapGapMs: Number(event.target.value) })} /></label>
         <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
-        <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
-        <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
       </div>
-      <p className="microcopy">Precision low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. Chopping uses only its tiny crop every 15s by default to re-sync the real countdown. Near predicted Ready it enters a short precision window, pauses counter OCR, and checks Chopping rapidly until the current game UI actually says Ready. E is never triggered by the local timer alone.</p>
+      <p className="microcopy">v0.3.5 low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. After a numeric Chopping cooldown is confirmed, the watcher sleeps between scheduled tiny synchronizations. Near predicted Ready it pauses counter OCR and prefers the learned fast state matcher; Tesseract remains a guarded fallback at the transition boundary. E is never triggered by the local timer alone. The optional Live Monitor is passive and opens only when you press its button.</p>
     </Section>
 
     <div className="floating-action-log">
       <div className="floating-action-log-head"><strong>Action Log</strong><span>LIVE · newest first</span></div>
-      <div className="floating-action-log-body">{status.diagnostics.length ? status.diagnostics.slice(0, 40).map((entry, index) => <div key={`action-${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span>{entry.message}</span></div>) : <span className="muted-text">Waiting for extension actions…</span>}</div>
+      <div className="floating-action-log-body">{status.diagnostics.length ? status.diagnostics.filter(entry => entry.level !== "debug").slice(0, 40).map((entry, index) => <div key={`action-${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span><b>{entry.category}</b> · {entry.message}</span></div>) : <span className="muted-text">Waiting for extension actions…</span>}</div>
     </div>
 
     <Section title="Diagnostics">
       <div className="diagnostic-strip">
+        <span>Health <strong>{status.health}</strong></span>
+        <span>Power <strong>{status.powerState}</strong></span>
         <span>Last OCR <strong>{status.lastOcrMs === undefined ? "—" : `${status.lastOcrMs} ms`}</strong></span>
-        <span>OCR confidence <strong>{status.lastOcrConfidence === undefined ? "—" : `${status.lastOcrConfidence.toFixed(0)}%`}</strong></span>
+        <span>Method <strong>{status.lastRecognitionMethod || "—"}</strong></span>
+        <span>Queue/capture <strong>{status.lastQueueWaitMs ?? 0}/{status.lastCaptureMs ?? 0} ms</strong></span>
         <span>Reads/min <strong>{status.readsLastMinute}</strong></span>
         <span>Crop <strong>{status.ocrProfile || "un-calibrated"}</strong></span>
-        <span>Viewport <strong>{status.viewportWidth && status.viewportHeight ? `${Math.round(status.viewportWidth)}×${Math.round(status.viewportHeight)}` : "—"}</strong></span>
         <span>Ready prediction <strong>{status.predictedReadyAt ? `${Math.max(0, (status.predictedReadyAt - Date.now()) / 1000).toFixed(2)}s` : "—"}</strong></span>
         <span>Cooldown drift <strong>{status.boostDriftSeconds === undefined ? "—" : `${status.boostDriftSeconds >= 0 ? "+" : ""}${status.boostDriftSeconds.toFixed(2)}s`}</strong></span>
-        <span>Ready prediction <strong>{status.predictedReadyAt ? `${Math.max(0, (status.predictedReadyAt - Date.now()) / 1000).toFixed(2)}s` : "—"}</strong></span>
-        <span>Cooldown drift <strong>{status.boostDriftSeconds === undefined ? "—" : `${status.boostDriftSeconds >= 0 ? "+" : ""}${status.boostDriftSeconds.toFixed(2)}s`}</strong></span>
+        <span>Uncertainty <strong>{status.cooldownUncertaintySec === undefined ? "—" : `±${status.cooldownUncertaintySec.toFixed(2)}s`}</strong></span>
+        <span>Ready→E1 <strong>{status.readyToE1LatencyLastMs === undefined ? "—" : `${status.readyToE1LatencyLastMs}ms`}</strong></span>
+        <span>Rejected reads <strong>{status.rejectedOcrCount}</strong></span>
       </div>
-      <div className="diagnostic-log">{status.diagnostics.length ? status.diagnostics.slice(0, 24).map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span>{entry.message}</span></div>) : <span className="muted-text">No diagnostic events yet.</span>}</div>
+      <div className="diagnostic-log">{status.diagnostics.length ? status.diagnostics.slice(0, 40).map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.level}><time>{new Date(entry.at).toLocaleTimeString()}</time><span><b>{entry.category}</b> · {entry.message}{entry.details && <small> · {Object.entries(entry.details).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}</small>}</span></div>) : <span className="muted-text">No diagnostic events yet.</span>}</div>
       <button className="quiet-button danger" onClick={() => void run(() => command({ target: "background", type: "EMERGENCY_STOP" }))}>Emergency stop</button>
     </Section>
   </>;
