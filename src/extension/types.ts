@@ -3,6 +3,7 @@ import type { RelativeOcrRect } from "./ocrCalibration";
 
 export type ExtensionConnectionMode = "manual" | "auto" | "dumb";
 export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
+export type OffscreenWakeId = "boost-sync" | "boost-precision";
 
 export interface ExtensionSettings {
   mode: ExtensionConnectionMode;
@@ -84,7 +85,8 @@ export type BackgroundCommand =
   | { target: "background"; type: "STOP_SESSION" }
   | { target: "background"; type: "TEST_E" }
   | { target: "background"; type: "CLEAR_BOOST_FAULT" }
-  | { target: "background"; type: "EMERGENCY_STOP" };
+  | { target: "background"; type: "EMERGENCY_STOP" }
+  | { target: "background"; type: "OFFSCREEN_WAKE"; id: OffscreenWakeId };
 
 export interface BackgroundResponse<T = unknown> {
   ok: boolean;
@@ -107,6 +109,11 @@ export interface OcrRequest {
   inputScope?: OcrInputScope;
   preferFast?: boolean;
 }
+
+export type OffscreenControlRequest =
+  | { target: "offscreen"; type: "SCHEDULE_WAKE"; id: OffscreenWakeId; when: number }
+  | { target: "offscreen"; type: "CANCEL_WAKE"; id: OffscreenWakeId }
+  | { target: "offscreen"; type: "RESET_CALIBRATION" };
 
 export interface OcrResponse {
   ok: boolean;
