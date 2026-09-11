@@ -1,0 +1,56 @@
+name: Harden v0.3.7 final timing
+
+on:
+  push:
+    branches:
+      - fix/v037-final-polish
+    paths:
+      - .github/workflows/harden-v037-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[v037-hardened]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v037-final-polish
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply final hardening
+        run: python3 scripts/harden-v037-final.py
+      - name: Remove hardening-only helpers
+        run: |
+          rm scripts/harden-v037-final.py
+          rm .github/workflows/harden-v037-final.yml
+      - name: Install dependencies
+        run: npm install --package-lock=false --no-audit --no-fund
+      - name: Unit tests
+        run: npm test
+      - name: Website build
+        run: npm run build
+      - name: Extension build
+        run: npm run build:extension
+      - name: Extension audit
+        run: npm run audit:extension
+      - name: Diff hygiene
+        run: |
+          git diff --check
+          test ! -e scripts/harden-v037-final.py
+          test ! -e .github/workflows/harden-v037-final.yml
+          test ! -e scripts/apply-v037-final.py
+          test ! -e .github/workflows/apply-v037-final.yml
+          test ! -e package-lock.json
+          test -z "$(git ls-files dist-extension)"
+      - name: Commit hardened source
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Harden v0.3.7 boundary timing [v037-hardened]"
+          git push origin HEAD:fix/v037-final-polish
