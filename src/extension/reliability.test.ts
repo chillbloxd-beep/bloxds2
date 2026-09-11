@@ -3,6 +3,7 @@ import {
   PriorityOcrQueue,
   cooldownSyncDelayMs,
   isStaleObservation,
+  precisionProbePlan,
   transitionVerdict
 } from "./reliability";
 
@@ -71,5 +72,14 @@ describe("cooldownSyncDelayMs", () => {
     expect(cooldownSyncDelayMs({ remainingMs: 20_000, nominalIntervalSec: 15, uncertaintySec: 0.5 })).toBe(7_000);
     expect(cooldownSyncDelayMs({ remainingMs: 8_000, nominalIntervalSec: 15, uncertaintySec: 0.5 })).toBe(2_500);
     expect(cooldownSyncDelayMs({ remainingMs: 80_000, nominalIntervalSec: 15, uncertaintySec: 4.5 })).toBe(3_000);
+  });
+});
+
+describe("precisionProbePlan", () => {
+  it("uses cheap learned probes before the boundary and backs off authoritative OCR", () => {
+    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true })).toEqual({ fastOnly: true, nextDelayMs: 500 });
+    expect(precisionProbePlan({ remainingMs: 700, hasMicroCrop: true })).toEqual({ fastOnly: true, nextDelayMs: 250 });
+    expect(precisionProbePlan({ remainingMs: 100, hasMicroCrop: true })).toEqual({ fastOnly: false, nextDelayMs: 700 });
+    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: false })).toEqual({ fastOnly: false, nextDelayMs: 500 });
   });
 });
