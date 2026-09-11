@@ -136,7 +136,7 @@ for (const stale of ["default every 5 seconds", "side-panel status polling also 
   expect(!readme.includes(stale), `README still contains stale behavior: ${stale}`);
 }
 expect(readme.includes("never opened automatically"), "README does not document manual-only monitor behavior");
-expect(readme.includes("sleep state"), "README does not document cooldown sleep behavior");
+expect(readme.includes("deep-sleep"), "README does not document cooldown deep-sleep behavior");
 expect(readme.includes("v0.3.6"), "README does not identify the v0.3.6 fix release");
 
 console.log("Extension audit passed: v0.3.6 source, live-regression safeguards, passive monitor, low-overhead scheduling, build output and OCR assets are internally consistent.");
