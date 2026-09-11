@@ -167,7 +167,7 @@ export function LiveExtension({
 
       <Section title="Chopping boost">
         <div className="boost-state"><Badge tone={skillTone(status.choppingSkill)}>{skillLabel(status.choppingSkill)}</Badge><span>{settings.autoBoost ? "Automation on" : "Automation off"}</span></div>
-        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Chopping Ready → E ×5 → fast verify. If Ready is confirmed twice, one backup E ×3 burst is sent. Neighboring Digging/Gold Ready states cannot trigger E.</small></span><input type="checkbox" checked={settings.autoBoost} disabled={settings.mode === "dumb"} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
+        <label className="switch-row compact-switch"><span><strong>Auto-use Chopping skill</strong><small>Trusted cooldowns use a six-tap scheduled boundary window around predicted Ready, with OCR/counter work blacked out at the transition. If timing cannot be locked safely, it falls back to actual Ready confirmation. One backup E ×3 remains the only retry.</small></span><input type="checkbox" checked={settings.autoBoost} disabled={settings.mode === "dumb"} onChange={event => void patch({ autoBoost: event.target.checked })} /></label>
         <label className="switch-row compact-switch"><span><strong>Live counter OCR</strong><small>Samples only the Blocks mined region for rolling speed.</small></span><input type="checkbox" checked={settings.liveCounter} disabled={settings.mode === "dumb"} onChange={event => void patch({ liveCounter: event.target.checked })} /></label>
         <div className="mode-note"><strong>Watcher:</strong> {settings.autoBoost ? (status.boostFault ? "Paused by fault" : status.choppingSkill.state === "unknown" ? "Waiting for clear Chopping OCR; auto-rechecking" : `Armed · ${skillLabel(status.choppingSkill)}`) : "Off"}</div>
         <button className="quiet-button" disabled={busy || !status.connected || settings.autoBoost} onClick={() => void run(() => command({ target: "background", type: "TEST_E" }))}>Test E ×5</button>
@@ -175,7 +175,7 @@ export function LiveExtension({
       </Section>
     </div>
 
-    <Section title="Current sidebar read">
+    <Section title="Last full sidebar snapshot">
       <div className="section-inline-action">
         <button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "REFRESH_FULL" }))}>Refresh full panel</button>
         <button className="quiet-button" disabled={busy || !status.connected} onClick={() => void run(() => command({ target: "background", type: "RECALIBRATE_OCR" }))}>Recalibrate OCR</button>
@@ -205,7 +205,7 @@ export function LiveExtension({
         <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
       </div>
-      <p className="microcopy">v0.3.5 low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. After a numeric Chopping cooldown is confirmed, the watcher sleeps between scheduled tiny synchronizations. Near predicted Ready it pauses counter OCR and prefers the learned fast state matcher; Tesseract remains a guarded fallback at the transition boundary. E is never triggered by the local timer alone. The optional Live Monitor is passive and opens only when you press its button.</p>
+      <p className="microcopy">v0.3.7 low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. After a numeric Chopping cooldown is confirmed, the watcher sleeps between scheduled tiny synchronizations. Near predicted Ready it pauses counter OCR and prefers the learned fast state matcher; Tesseract remains a guarded fallback at the transition boundary. E is never triggered by the local timer alone. The optional Live Monitor is passive and opens only when you press its button.</p>
     </Section>
 
     <div className="floating-action-log">

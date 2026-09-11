@@ -133,6 +133,17 @@ export function cooldownSamplesAgree(
   return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) <= toleranceMs;
 }
 
+
+export const BOUNDARY_E_OFFSETS_MS = [-1000, -600, -200, 200, 600, 1000] as const;
+export const FINAL_LOCK_AGREEMENT_MS = 1_000;
+
+/** Final boundary lock is intentionally stricter than ordinary cooldown sync.
+ * Two integer countdown samples must predict Ready within 1 second before the
+ * low-latency scheduled input window is allowed. */
+export function finalLockSamplesAgree(first: CooldownSample, second: CooldownSample): boolean {
+  return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;
+}
+
 export type TransitionVerdict = "accept" | "confirm";
 
 /**

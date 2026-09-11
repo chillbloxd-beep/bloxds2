@@ -11,8 +11,8 @@ const count = (text, needle) => text.split(needle).length - 1;
 
 const pkg = JSON.parse(read("package.json"));
 const manifestSource = JSON.parse(read("extension/public/manifest.json"));
-expect(pkg.version === "0.3.6", `package.json version is ${pkg.version}, expected 0.3.6`);
-expect(manifestSource.version === "0.3.6", `manifest source version is ${manifestSource.version}, expected 0.3.6`);
+expect(pkg.version === "0.3.7", `package.json version is ${pkg.version}, expected 0.3.7`);
+expect(manifestSource.version === "0.3.7", `manifest source version is ${manifestSource.version}, expected 0.3.7`);
 expect(manifestSource.manifest_version === 3, "manifest must remain MV3");
 for (const permission of ["debugger", "offscreen", "sidePanel", "storage", "tabs", "windows"]) {
   expect(manifestSource.permissions.includes(permission), `manifest missing ${permission} permission`);
@@ -34,7 +34,7 @@ const requiredBuildFiles = [
 ];
 for (const file of requiredBuildFiles) expect(exists(file), `missing build file ${file}`);
 const builtManifest = JSON.parse(read("dist-extension/manifest.json"));
-expect(builtManifest.version === "0.3.6", `built manifest version is ${builtManifest.version}`);
+expect(builtManifest.version === "0.3.7", `built manifest version is ${builtManifest.version}`);
 expect(builtManifest.permissions.includes("windows"), "built manifest is missing windows permission for manual monitor popup");
 
 const trackedGenerated = execFileSync("git", ["ls-files", "dist-extension", "package-lock.json"], { cwd: root, encoding: "utf8" }).trim();
@@ -53,7 +53,7 @@ expect(/case "GET_STATUS":\s*return \{ ok: true, status: status\(\) \};/.test(ba
 expect(!/case "GET_STATUS":[\s\S]{0,220}(reconcileConnection|readBoost|readCounter|readFullSnapshot|refreshLiveStateOnPoll)/.test(background), "GET_STATUS can still drive connection/OCR work");
 expect(!background.includes("refreshLiveStateOnPoll"), "obsolete UI-driven live OCR loop remains in background");
 
-// v0.3.6 live-regression safeguards. These directly cover failures observed in
+// v0.3.7 live-regression safeguards. These directly cover failures observed in
 // the v0.3.5 15-minute browser recording rather than only compile-time shape.
 expect(background.includes("cooldownSamplesAgree"), "cooldown samples are not compared by predicted Ready boundary");
 expect(background.includes("cooldown.provisional"), "first numeric cooldown is not treated as provisional");
@@ -62,19 +62,27 @@ expect(background.includes("cooldown.recovery_candidate"), "large-drift recovery
 expect(background.includes("cooldown.recovered"), "two-sample recovery quorum cannot replace a stale prediction");
 expect(background.includes("!wasRapidTransitionConfirm && quickTransitionConfirm"), "newly observed early Ready does not schedule immediate confirmation");
 expect(background.includes("scheduleRecheck(0.15)"), "early Ready/Active confirmation is not sub-second");
-expect(background.includes("precisionLeadMs"), "precision watcher does not start ahead of integer countdown zero");
-expect(background.includes('cancelOffscreenWake("boost-sync")'), "normal cooldown sync is not cancelled when precision owns the boundary");
-expect(background.includes("fastRecognizerReady"), "background does not track whether fast Ready/Active matching is actually trained");
-expect(background.includes("noProfileFallback: true"), "precision reads can still trigger multi-profile fallback hunting");
+expect(background.includes("boundary.lock_confirmed"), "strict two-read final timing lock is missing");
+expect(background.includes("finalLockSamplesAgree"), "final boundary lock is not using the stricter agreement rule");
+expect(background.includes('scheduleOffscreenWake("boost-boundary"'), "dedicated boundary input wake is missing");
+expect(background.includes("BOUNDARY_E_OFFSETS_MS"), "scheduled boundary E coverage is missing");
+expect(background.includes('cancelOffscreenWake("counter")'), "counter blackout is missing near the activation boundary");
+expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter can still start during the critical input/verification window");
+expect(background.includes("noProfileFallback: true"), "final lock reads can still trigger multi-profile fallback hunting");
 expect(background.includes("micro.miss_deferred"), "single micro-crop misses still immediately trigger larger fallback work");
 expect(background.includes("boost.profile_recovery_deferred"), "multi-profile recovery is not staged after transient misses");
 expect(background.includes("await delay(25);"), "E key down/up still has no deliberate hold interval");
 expect(background.includes("metadata.retry"), "missing Phase metadata has no one-time connection retry");
 
-expect(background.includes("fastOnly"), "precision fast-only path is missing");
-expect(background.includes("precisionProbePlan"), "bounded precision probe scheduler is missing");
+const boundaryStart = background.indexOf("async function runBoundaryActivation()");
+const boundaryEnd = background.indexOf("async function beginBoostCycle()", boundaryStart);
+expect(boundaryStart >= 0 && boundaryEnd > boundaryStart, "boundary activation function could not be isolated");
+const boundaryBlock = background.slice(boundaryStart, boundaryEnd);
+expect(!boundaryBlock.includes("readBoost("), "boundary input window performs Chopping OCR");
+expect(!boundaryBlock.includes("readCounter("), "boundary input window performs counter OCR");
+expect(!boundaryBlock.includes("captureOcr("), "boundary input window performs screenshot/OCR capture");
 expect(background.includes("setPowerState(\"deep-sleep\")"), "explicit deep-sleep state is missing");
-expect(background.includes("precisionWindowActive || nearReady"), "counter is not pre-deferred just before the precision window");
+expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter is not pre-deferred across the final lock/input/verification window");
 expect(background.includes("rejectedOcrCount"), "rejected-reading diagnostics are missing");
 expect(background.includes("readyToE1Latencies"), "Ready-to-E dispatch instrumentation is missing");
 expect(background.includes("diagnostics].slice(0, 500)"), "structured diagnostic ring buffer is not capped at 500 events");
@@ -82,13 +90,13 @@ expect(background.includes("diagnostics].slice(0, 500)"), "structured diagnostic
 const reliability = read("src/extension/reliability.ts");
 expect(reliability.includes("cooldownReadyEstimateMs"), "absolute cooldown Ready estimator is missing");
 expect(reliability.includes("cooldownSamplesAgree"), "cooldown agreement helper is missing");
-expect(reliability.includes("fastRecognizerReady"), "precision planner is not gated on fast recognizer readiness");
-expect(/fastOnly\s*=\s*options\.hasMicroCrop\s*&&\s*options\.fastRecognizerReady/.test(reliability), "fast-only probing can run before the matcher is trained");
+expect(reliability.includes("FINAL_LOCK_AGREEMENT_MS = 1_000"), "final lock agreement is not capped at 1 second");
+expect(reliability.includes("BOUNDARY_E_OFFSETS_MS"), "boundary E coverage constants are missing");
 
 const calibration = read("src/extension/ocrCalibration.ts");
-expect(calibration.includes("normalizedStateCellRect"), "stable Chopping Skill-cell crop helper is missing");
-expect(calibration.includes("imageWidth * 0.42"), "Chopping state-cell width is not fixed across Ready/Active/cooldown token widths");
-expect(!calibration.includes("wordWidth * 2.2"), "Chopping state crop still depends on current token width");
+expect(calibration.includes("normalizedSkillValueRect"), "Skill:-anchored Chopping value crop helper is missing");
+expect(calibration.includes("resemblesSkillAnchor"), "Chopping crop is not anchored to the stable Skill: label");
+expect(calibration.includes("skillAnchor.x1"), "Chopping value crop does not start from the fixed Skill: anchor");
 
 const offscreen = read("src/extension/offscreen.ts");
 expect(offscreen.includes("request.fastOnly"), "offscreen fast-only recognizer path is missing");
@@ -127,7 +135,9 @@ for (const temp of [
   "scripts/tune-v036-runtime.py",
   "scripts/guard-v036-rapid-confirm.py",
   ".github/workflows/apply-v036-fixes.yml",
-  ".github/workflows/tune-v036-runtime.yml"
+  ".github/workflows/tune-v036-runtime.yml",
+  "scripts/apply-v037-final.py",
+  ".github/workflows/apply-v037-final.yml"
 ]) {
   expect(!exists(temp), `temporary development file still present: ${temp}`);
 }
@@ -138,6 +148,6 @@ for (const stale of ["default every 5 seconds", "side-panel status polling also 
 }
 expect(readme.includes("never opened automatically"), "README does not document manual-only monitor behavior");
 expect(/Chopping cooldown:\s*sleep between scheduled tiny reads/i.test(readme), "README does not document cooldown sleep behavior");
-expect(readme.includes("v0.3.6"), "README does not identify the v0.3.6 fix release");
+expect(readme.includes("v0.3.7"), "README does not identify the v0.3.7 fix release");
 
-console.log("Extension audit passed: v0.3.6 source, live-regression safeguards, passive monitor, low-overhead scheduling, build output and OCR assets are internally consistent.");
+console.log("Extension audit passed: v0.3.7 strict boundary lock, OCR blackout, Skill-anchor crop, live-regression safeguards, passive monitor, build output and OCR assets are internally consistent.");

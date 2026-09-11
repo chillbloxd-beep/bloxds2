@@ -52,6 +52,17 @@ describe("micro crop discovery", () => {
     expect(Math.abs(ready.x - cooldown.x)).toBeLessThan(0.03);
     expect(Math.abs(ready.width - active.width)).toBeLessThan(0.03);
     expect(Math.abs(ready.width - cooldown.width)).toBeLessThan(0.03);
+    expect(ready.x).toBeCloseTo(active.x, 6);
+    expect(ready.x).toBeCloseTo(cooldown.x, 6);
+    expect(ready.y).toBeCloseTo(active.y, 6);
+    expect(ready.y).toBeCloseTo(cooldown.y, 6);
+  });
+
+  it("anchors the Chopping value crop to Skill: rather than the changing state token", () => {
+    const movedReady = fixture.replace("bbox 275 115 350 140'>Ready", "bbox 285 115 365 140'>Ready");
+    const a = findBoostStateRect(parseHocrWords(fixture), 400, 240)!;
+    const b = findBoostStateRect(parseHocrWords(movedReady), 400, 240)!;
+    expect(a).toEqual(b);
   });
 
   it("finds the Blocks mined number crop", () => {
