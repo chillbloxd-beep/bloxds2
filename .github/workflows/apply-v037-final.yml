@@ -22,6 +22,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Tighten final-lock agreement before migration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-v037-final.py')
+          text = p.read_text()
+          old = 'return cooldownSamplesAgree(first, second, FINAL_LOCK_AGREEMENT_MS);'
+          new = 'return Math.abs(cooldownReadyEstimateMs(first) - cooldownReadyEstimateMs(second)) < FINAL_LOCK_AGREEMENT_MS;'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one final-lock helper to tighten, found {text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
       - name: Apply deterministic migration
         run: python3 scripts/apply-v037-final.py
       - name: Remove migration-only helpers before validation
