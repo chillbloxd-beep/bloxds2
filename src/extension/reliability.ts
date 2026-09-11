@@ -35,11 +35,9 @@ interface QueueItem<T> {
 
 /**
  * Single-concurrency priority queue for expensive capture/OCR work.
- *
- * We deliberately keep OCR single-threaded to avoid competing with the game.
- * Priority only reorders work that has not started yet; a running OCR task is
- * never interrupted. Expired low-priority work is discarded instead of
- * executing stale analytics after a time-critical Chopping read becomes due.
+ * Priority reorders only work that has not started; a running OCR task is not
+ * interrupted. Expired low-priority work is discarded instead of running stale
+ * analytics after a time-critical Chopping read becomes due.
  */
 export class PriorityOcrQueue {
   private pending: QueueItem<unknown>[] = [];
@@ -154,9 +152,8 @@ export function transitionVerdict(options: {
 }
 
 /**
- * Dumb mode still honours the requested ~15 s cooldown synchronization for
- * most of the cooldown, but tightens only near Ready or when drift uncertainty
- * is high. This avoids brute-force OCR while improving final-second accuracy.
+ * Dumb mode honours the requested ~15 s cooldown synchronization for most of
+ * the cooldown and tightens only near Ready or when uncertainty is high.
  */
 export function cooldownSyncDelayMs(options: {
   remainingMs: number;
@@ -174,4 +171,23 @@ export function cooldownSyncDelayMs(options: {
   else if (options.uncertaintySec >= 2) seconds = Math.min(seconds, 5);
 
   return Math.max(750, Math.round(seconds * 1000));
+}
+
+/**
+ * Precision probing avoids repeatedly invoking Tesseract. While the predicted
+ * transition is still more than 150 ms away and a learned micro-crop exists,
+ * use the cheap template path only. At the transition boundary, allow one
+ * authoritative Tesseract fallback and then back off before trying again.
+ */
+export function precisionProbePlan(options: {
+  remainingMs: number;
+  hasMicroCrop: boolean;
+}): { fastOnly: boolean; nextDelayMs: number } {
+  const remainingMs = options.remainingMs;
+  const fastOnly = options.hasMicroCrop && remainingMs > 150;
+  let nextDelayMs: number;
+  if (remainingMs > 1_000) nextDelayMs = 500;
+  else if (remainingMs > 150) nextDelayMs = 250;
+  else nextDelayMs = 700;
+  return { fastOnly, nextDelayMs };
 }
