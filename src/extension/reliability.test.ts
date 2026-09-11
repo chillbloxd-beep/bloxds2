@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PriorityOcrQueue,
+  cooldownReadyEstimateMs,
+  cooldownSamplesAgree,
   cooldownSyncDelayMs,
   isStaleObservation,
   precisionProbePlan,
@@ -44,6 +46,28 @@ describe("observation ordering", () => {
   });
 });
 
+describe("cooldown sample agreement", () => {
+  it("compares predicted Ready boundaries rather than raw displayed seconds", () => {
+    const first = { seconds: 149, captureAt: 10_000 };
+    const second = { seconds: 148, captureAt: 11_000 };
+    expect(cooldownReadyEstimateMs(first)).toBe(159_000);
+    expect(cooldownReadyEstimateMs(second)).toBe(159_000);
+    expect(cooldownSamplesAgree(first, second)).toBe(true);
+  });
+
+  it("rejects the real v0.3.5-style 185s -> 149s bad first anchor", () => {
+    const bad = { seconds: 185, captureAt: 10_000 };
+    const good = { seconds: 149, captureAt: 11_000 };
+    expect(cooldownSamplesAgree(bad, good)).toBe(false);
+  });
+
+  it("allows two later mutually-consistent samples to form a recovery quorum", () => {
+    const firstRecovery = { seconds: 6, captureAt: 100_000 };
+    const secondRecovery = { seconds: 5, captureAt: 101_000 };
+    expect(cooldownSamplesAgree(firstRecovery, secondRecovery)).toBe(true);
+  });
+});
+
 describe("transitionVerdict", () => {
   it("requires confirmation for implausibly early Ready", () => {
     expect(transitionVerdict({
@@ -76,10 +100,21 @@ describe("cooldownSyncDelayMs", () => {
 });
 
 describe("precisionProbePlan", () => {
-  it("uses cheap learned probes before the boundary and backs off authoritative OCR", () => {
-    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true })).toEqual({ fastOnly: true, nextDelayMs: 500 });
-    expect(precisionProbePlan({ remainingMs: 700, hasMicroCrop: true })).toEqual({ fastOnly: true, nextDelayMs: 250 });
-    expect(precisionProbePlan({ remainingMs: 100, hasMicroCrop: true })).toEqual({ fastOnly: false, nextDelayMs: 700 });
-    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: false })).toEqual({ fastOnly: false, nextDelayMs: 500 });
+  it("uses cheap learned probes only when the matcher is actually trained", () => {
+    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: true, nextDelayMs: 350 });
+    expect(precisionProbePlan({ remainingMs: 700, hasMicroCrop: true, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: true, nextDelayMs: 150 });
+    expect(precisionProbePlan({ remainingMs: 100, hasMicroCrop: true, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: true, nextDelayMs: 120 });
+  });
+
+  it("does not schedule guaranteed fast-only misses before both templates exist", () => {
+    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: true, fastRecognizerReady: false }))
+      .toEqual({ fastOnly: false, nextDelayMs: 900 });
+    expect(precisionProbePlan({ remainingMs: 500, hasMicroCrop: true, fastRecognizerReady: false }))
+      .toEqual({ fastOnly: false, nextDelayMs: 700 });
+    expect(precisionProbePlan({ remainingMs: 3_000, hasMicroCrop: false, fastRecognizerReady: true }))
+      .toEqual({ fastOnly: false, nextDelayMs: 900 });
   });
 });
