@@ -52,6 +52,8 @@ describe("micro crop discovery", () => {
     expect(Math.abs(ready.x - cooldown.x)).toBeLessThan(0.03);
     expect(Math.abs(ready.width - active.width)).toBeLessThan(0.03);
     expect(Math.abs(ready.width - cooldown.width)).toBeLessThan(0.03);
+    expect(ready.x).toBeLessThanOrEqual(220 / 400);
+    expect(ready.x + ready.width).toBeGreaterThanOrEqual(350 / 400);
     expect(ready.x).toBeCloseTo(active.x, 6);
     expect(ready.x).toBeCloseTo(cooldown.x, 6);
     expect(ready.y).toBeCloseTo(active.y, 6);
