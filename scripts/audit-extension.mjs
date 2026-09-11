@@ -42,8 +42,12 @@ expect(trackedGenerated === "", `generated build output is tracked in source: ${
 
 const background = read("extension/background-v3.ts");
 expect(background.includes('case "OPEN_MONITOR"'), "background has no manual monitor command");
-expect(background.includes('command.id === "counter"'), "counter wake is not handled independently of Auto Boost");
-expect(background.indexOf('command.id === "counter"') < background.indexOf('if (!settings.autoBoost || connectedTabId === undefined || boostFault)'), "counter wake is incorrectly gated by Auto Boost");
+const offscreenWakeStart = background.indexOf('case "OFFSCREEN_WAKE":');
+const emergencyStopStart = background.indexOf('case "EMERGENCY_STOP":', offscreenWakeStart);
+expect(offscreenWakeStart >= 0 && emergencyStopStart > offscreenWakeStart, "OFFSCREEN_WAKE command block could not be isolated");
+const offscreenWakeBlock = background.slice(offscreenWakeStart, emergencyStopStart);
+expect(offscreenWakeBlock.includes('command.id === "counter"'), "counter wake is not handled in OFFSCREEN_WAKE");
+expect(offscreenWakeBlock.indexOf('command.id === "counter"') < offscreenWakeBlock.indexOf('if (!settings.autoBoost || connectedTabId === undefined || boostFault)'), "counter wake is incorrectly gated by Auto Boost inside OFFSCREEN_WAKE");
 expect(background.includes('scheduleOffscreenWake("counter"'), "counter scheduling is not offscreen-driven");
 expect(/case "GET_STATUS":\s*return \{ ok: true, status: status\(\) \};/.test(background), "GET_STATUS is not a pure cached-state read");
 expect(!/case "GET_STATUS":[\s\S]{0,220}(reconcileConnection|readBoost|readCounter|readFullSnapshot|refreshLiveStateOnPoll)/.test(background), "GET_STATUS can still drive connection/OCR work");
