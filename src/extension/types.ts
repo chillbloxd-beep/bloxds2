@@ -108,6 +108,12 @@ export interface OcrRequest {
   calibrationKey?: string;
   inputScope?: OcrInputScope;
   preferFast?: boolean;
+  /**
+   * When true, a failed fast template comparison returns Unknown immediately
+   * instead of invoking Tesseract. Used only for cheap sub-second probes near
+   * predicted Ready; authoritative reads still keep the Tesseract fallback.
+   */
+  fastOnly?: boolean;
 }
 
 export type OffscreenControlRequest =
@@ -125,6 +131,7 @@ export interface OcrResponse {
   choppingSkill?: SkillStateSnapshot;
   microRect?: RelativeOcrRect;
   recognitionMethod?: OcrRecognitionMethod;
+  fastAttempted?: boolean;
   fastMatchedLabel?: "ready" | "active";
   error?: string;
 }
