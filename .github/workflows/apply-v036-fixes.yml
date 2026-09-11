@@ -1,0 +1,34 @@
+name: Apply v0.3.6 live fixes
+
+on:
+  push:
+    branches:
+      - fix/v036-live-reliability
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, '[v036-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v036-live-reliability
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply guarded source patch
+        run: python3 scripts/apply-v036-background-fixes.py
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - run: npm run build:extension
+      - name: Commit only validated background changes
+        run: |
+          git config user.name "chillbloxd-beep"
+          git config user.email "chill.bloxd@gmail.com"
+          git add extension/background-v3.ts
+          test -n "$(git diff --cached --name-only)"
+          git commit -m "Fix v0.3.6 live cooldown and Ready timing [v036-applied]"
+          git push origin HEAD:fix/v036-live-reliability
