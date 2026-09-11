@@ -96,6 +96,7 @@ expect(reliability.includes("cooldownReadyEstimateMs"), "absolute cooldown Ready
 expect(reliability.includes("cooldownSamplesAgree"), "cooldown agreement helper is missing");
 expect(reliability.includes("FINAL_LOCK_AGREEMENT_MS = 1_000"), "final lock agreement is not capped at 1 second");
 expect(reliability.includes("BOUNDARY_E_OFFSETS_MS"), "boundary E coverage constants are missing");
+expect(reliability.includes("BOUNDARY_WAKE_LEAD_MS = 2_000"), "boundary wake does not reserve 1s of pre-focus headroom before the first E slot");
 
 const calibration = read("src/extension/ocrCalibration.ts");
 expect(calibration.includes("normalizedSkillValueRect"), "Skill:-anchored Chopping value crop helper is missing");
@@ -153,5 +154,9 @@ for (const stale of ["default every 5 seconds", "side-panel status polling also 
 expect(readme.includes("never opened automatically"), "README does not document manual-only monitor behavior");
 expect(/Chopping cooldown:\s*sleep between scheduled tiny reads/i.test(readme), "README does not document cooldown sleep behavior");
 expect(readme.includes("v0.3.7"), "README does not identify the v0.3.7 fix release");
+expect(!readme.includes("only a fresh Chopping `Ready` observation can start the E sequence"), "README still describes the pre-v0.3.7 OCR-trigger-only architecture");
+expect(readme.includes("six E presses span ±1 second"), "README does not document the trusted scheduled boundary path accurately");
+expect(live.includes("two strict final-lock countdown reads"), "Live UI does not describe the final timer lock accurately");
+expect(!live.includes("E is never triggered by the local timer alone"), "Live UI still contains the pre-v0.3.7 timer claim");
 
 console.log("Extension audit passed: v0.3.7 strict boundary lock, OCR blackout, Skill-anchor crop, live-regression safeguards, passive monitor, build output and OCR assets are internally consistent.");

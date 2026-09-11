@@ -2,7 +2,7 @@ import type { MiningSession, SidebarSnapshot, SkillStateSnapshot } from "../src/
 import { cropRegion, isUsableSnapshot, profileOrder, snapshotScore, type OcrViewport } from "../src/extension/crop";
 import { isOneBlockUrl, lobbyFromUrl } from "../src/extension/parser";
 import type { RelativeOcrRect } from "../src/extension/ocrCalibration";
-import { BOUNDARY_E_OFFSETS_MS, OcrDeadlineError, PriorityOcrQueue, cooldownReadyEstimateMs, cooldownSamplesAgree, cooldownSyncDelayMs, finalLockSamplesAgree, isStaleObservation, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
+import { BOUNDARY_E_OFFSETS_MS, BOUNDARY_WAKE_LEAD_MS, OcrDeadlineError, PriorityOcrQueue, cooldownReadyEstimateMs, cooldownSamplesAgree, cooldownSyncDelayMs, finalLockSamplesAgree, isStaleObservation, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
 import type {
   ActiveExtensionSession,
   BackgroundCommand,
@@ -1161,7 +1161,7 @@ function scheduleBoundaryBurst() {
   void cancelOffscreenWake("boost-sync");
   void cancelOffscreenWake("boost-precision");
   void cancelOffscreenWake("counter");
-  boundaryWakeAt = Math.max(Date.now() + 25, predictedReadyAt - 1_300);
+  boundaryWakeAt = Math.max(Date.now() + 25, predictedReadyAt - BOUNDARY_WAKE_LEAD_MS);
   setPowerState("precision");
   log(`Final timing lock accepted. OCR/counter blackout armed; boundary input wake in ${Math.max(0, boundaryWakeAt - Date.now())}ms.`, "info", {
     category: "timer", event: "boundary.armed", details: { predictedReadyAt, boundaryWakeAt, uncertaintySec: cooldownUncertaintySec }

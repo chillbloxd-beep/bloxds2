@@ -205,7 +205,7 @@ export function LiveExtension({
         <label className="field"><span>Cooldown sync interval (s)</span><input type="number" min="5" max="30" step="1" disabled={settings.mode === "dumb"} value={settings.cooldownSyncIntervalSec} onChange={event => void patch({ cooldownSyncIntervalSec: Number(event.target.value) })} /></label>
         <label className="field"><span>Precision Ready window (s)</span><input type="number" min="2" max="8" step="0.5" value={settings.precisionWindowSec} onChange={event => void patch({ precisionWindowSec: Number(event.target.value) })} /></label>
       </div>
-      <p className="microcopy">v0.3.7 low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. After a numeric Chopping cooldown is confirmed, the watcher sleeps between scheduled tiny synchronizations. Near predicted Ready it pauses counter OCR and prefers the learned fast state matcher; Tesseract remains a guarded fallback at the transition boundary. E is never triggered by the local timer alone. The optional Live Monitor is passive and opens only when you press its button.</p>
+      <p className="microcopy">v0.3.7 low-overhead mode: full sidebar OCR remains limited to connect/start/end/manual refresh. After a numeric Chopping cooldown is confirmed, the watcher sleeps between scheduled tiny synchronizations. Near predicted Ready it takes two strict final-lock countdown reads. If they agree, counter/OCR work is blacked out and six scheduled E presses cover the modeled Ready boundary; if they do not agree, the extension falls back to fresh actual-Ready confirmation instead of blind input. The optional Live Monitor is passive and opens only when you press its button.</p>
     </Section>
 
     <div className="floating-action-log">

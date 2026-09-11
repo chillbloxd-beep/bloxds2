@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BOUNDARY_E_OFFSETS_MS,
+  BOUNDARY_WAKE_LEAD_MS,
   PriorityOcrQueue,
   cooldownReadyEstimateMs,
   cooldownSamplesAgree,
@@ -130,12 +131,14 @@ describe("v0.3.7 final boundary lock", () => {
     const good = { seconds: 6, captureAt: 101_000 };
     const tooFar = { seconds: 7, captureAt: 101_000 };
     expect(finalLockSamplesAgree(first, good)).toBe(true);
+    expect(cooldownSamplesAgree(first, tooFar)).toBe(true);
     expect(finalLockSamplesAgree(first, tooFar)).toBe(false);
   });
 
   it("covers a two-second Ready uncertainty window with no gap above 400ms", () => {
     expect(BOUNDARY_E_OFFSETS_MS[0]).toBe(-1000);
     expect(BOUNDARY_E_OFFSETS_MS.at(-1)).toBe(1000);
+    expect(BOUNDARY_WAKE_LEAD_MS - Math.abs(BOUNDARY_E_OFFSETS_MS[0])).toBeGreaterThanOrEqual(1000);
     for (let index = 1; index < BOUNDARY_E_OFFSETS_MS.length; index += 1) {
       expect(BOUNDARY_E_OFFSETS_MS[index] - BOUNDARY_E_OFFSETS_MS[index - 1]).toBeLessThanOrEqual(400);
     }

@@ -135,6 +135,7 @@ export function cooldownSamplesAgree(
 
 
 export const BOUNDARY_E_OFFSETS_MS = [-1000, -600, -200, 200, 600, 1000] as const;
+export const BOUNDARY_WAKE_LEAD_MS = 2_000;
 export const FINAL_LOCK_AGREEMENT_MS = 1_000;
 
 /** Final boundary lock is intentionally stricter than ordinary cooldown sync.
