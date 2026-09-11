@@ -23,6 +23,9 @@ const fixture = `
   </span>
 </div>`;
 
+const activeFixture = fixture.replace("bbox 275 115 350 140'>Ready", "bbox 258 115 350 140'>Active");
+const cooldownFixture = fixture.replace("bbox 275 115 350 140'>Ready", "bbox 300 115 350 140'>149s");
+
 describe("parseHocrWords", () => {
   it("extracts word text and bounding boxes", () => {
     const words = parseHocrWords(fixture);
@@ -39,6 +42,16 @@ describe("micro crop discovery", () => {
     expect(rect!.y).toBeGreaterThanOrEqual(0);
     expect(rect!.x + rect!.width).toBeLessThanOrEqual(1);
     expect(rect!.y + rect!.height).toBeLessThanOrEqual(1);
+  });
+
+  it("keeps the Chopping Skill cell stable across Ready, Active and numeric cooldown widths", () => {
+    const ready = findBoostStateRect(parseHocrWords(fixture), 400, 240)!;
+    const active = findBoostStateRect(parseHocrWords(activeFixture), 400, 240)!;
+    const cooldown = findBoostStateRect(parseHocrWords(cooldownFixture), 400, 240)!;
+    expect(Math.abs(ready.x - active.x)).toBeLessThan(0.03);
+    expect(Math.abs(ready.x - cooldown.x)).toBeLessThan(0.03);
+    expect(Math.abs(ready.width - active.width)).toBeLessThan(0.03);
+    expect(Math.abs(ready.width - cooldown.width)).toBeLessThan(0.03);
   });
 
   it("finds the Blocks mined number crop", () => {
