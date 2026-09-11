@@ -3,7 +3,11 @@ import type { RelativeOcrRect } from "./ocrCalibration";
 
 export type ExtensionConnectionMode = "manual" | "auto" | "dumb";
 export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
-export type OffscreenWakeId = "boost-sync" | "boost-precision" | "boost-verify" | "boost-active";
+export type OffscreenWakeId = "boost-sync" | "boost-precision" | "boost-verify" | "boost-active" | "counter";
+export type ExtensionPowerState = "idle" | "deep-sleep" | "sync" | "precision" | "activating" | "verifying" | "active-wait" | "fault";
+export type ExtensionHealth = "healthy" | "degraded" | "paused" | "offline";
+export type DiagnosticCategory = "system" | "chopping" | "ocr" | "timer" | "input" | "counter" | "session";
+export type DiagnosticDetails = Record<string, string | number | boolean | null | undefined>;
 
 export interface ExtensionSettings {
   mode: ExtensionConnectionMode;
@@ -22,8 +26,11 @@ export interface ExtensionSettings {
 
 export interface DiagnosticEntry {
   at: string;
-  level: "info" | "warn" | "error";
+  level: "debug" | "info" | "warn" | "error";
+  category: DiagnosticCategory;
+  event: string;
   message: string;
+  details?: DiagnosticDetails;
 }
 
 export interface LiveExtensionStatus {
@@ -49,11 +56,29 @@ export interface LiveExtensionStatus {
   predictedReadyAt?: number;
   lastBoostCaptureAt?: number;
   boostDriftSeconds?: number;
+  cooldownUncertaintySec?: number;
+  lastAuthoritativeSyncAt?: number;
+  nextCooldownSyncAt?: number;
   dumbModeArmed?: boolean;
   ocrQueueDepth?: number;
   fastBoostHits?: number;
   boostMicroCalibrated?: boolean;
   counterMicroCalibrated?: boolean;
+  powerState: ExtensionPowerState;
+  health: ExtensionHealth;
+  healthReason?: string;
+  lastRecognitionMethod?: OcrRecognitionMethod;
+  lastQueueWaitMs?: number;
+  lastCaptureMs?: number;
+  rejectedOcrCount: number;
+  readyToE1LatencyLastMs?: number;
+  readyToE1LatencyMedianMs?: number;
+  readyToE1LatencyWorstMs?: number;
+  firstTryActivations: number;
+  backupSuccessfulActivations: number;
+  successfulActivations: number;
+  activationRetries: number;
+  failedActivations: number;
   settings: ExtensionSettings;
   currentSnapshot?: SidebarSnapshot;
   diagnostics: DiagnosticEntry[];
@@ -85,6 +110,7 @@ export type BackgroundCommand =
   | { target: "background"; type: "STOP_SESSION" }
   | { target: "background"; type: "TEST_E" }
   | { target: "background"; type: "CLEAR_BOOST_FAULT" }
+  | { target: "background"; type: "OPEN_MONITOR" }
   | { target: "background"; type: "EMERGENCY_STOP" }
   | { target: "background"; type: "OFFSCREEN_WAKE"; id: OffscreenWakeId };
 
@@ -94,6 +120,12 @@ export interface BackgroundResponse<T = unknown> {
   session?: MiningSession;
   value?: T;
   error?: string;
+}
+
+export interface UiStateMessage {
+  target: "ui";
+  type: "STATE_UPDATE";
+  status: LiveExtensionStatus;
 }
 
 export type OcrMode = "full" | "counter" | "boost";
@@ -108,11 +140,7 @@ export interface OcrRequest {
   calibrationKey?: string;
   inputScope?: OcrInputScope;
   preferFast?: boolean;
-  /**
-   * When true, a failed fast template comparison returns Unknown immediately
-   * instead of invoking Tesseract. Used only for cheap sub-second probes near
-   * predicted Ready; authoritative reads still keep the Tesseract fallback.
-   */
+  /** Cheap precision probe: if no learned Ready/Active template matches, return Unknown without Tesseract. */
   fastOnly?: boolean;
 }
 
