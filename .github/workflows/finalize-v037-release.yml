@@ -42,9 +42,9 @@ jobs:
           git diff --check
           test ! -e scripts/finalize-v037-release.py
           test ! -e .github/workflows/finalize-v037-release.yml
-          unexpected="$(git diff --name-only | grep -Ev '^(README.md|extension/background-v3.ts|scripts/audit-extension.mjs|src/extension/reliability.ts|src/extension/reliability.test.ts|src/views/LiveExtension.tsx)$' || true)"
+          unexpected="$(git diff --diff-filter=ACMRT --name-only | grep -Ev '^(README.md|extension/background-v3.ts|scripts/audit-extension.mjs|src/extension/reliability.ts|src/extension/reliability.test.ts|src/views/LiveExtension.tsx)$' || true)"
           if [ -n "$unexpected" ]; then
-            echo "Unexpected finalization files:"
+            echo "Unexpected modified/added finalization files:"
             echo "$unexpected"
             exit 1
           fi
