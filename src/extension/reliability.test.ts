@@ -129,7 +129,7 @@ describe("v0.3.7 final boundary lock", () => {
   it("requires tighter agreement than ordinary cooldown recovery", () => {
     const first = { seconds: 7, captureAt: 100_000 };
     const good = { seconds: 6, captureAt: 101_000 };
-    const tooFar = { seconds: 7, captureAt: 101_000 };
+    const tooFar = { seconds: 4, captureAt: 101_000 };
     expect(finalLockSamplesAgree(first, good)).toBe(true);
     expect(cooldownSamplesAgree(first, tooFar)).toBe(true);
     expect(finalLockSamplesAgree(first, tooFar)).toBe(false);

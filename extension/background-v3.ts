@@ -94,6 +94,8 @@ let pendingTransitionConfirm: { state: "ready" | "active"; captureAt: number } |
 let quickTransitionConfirm = false;
 let counterMisses = 0;
 let boostMisses = 0;
+let boostMicroFailureStreak = 0;
+let boostMicroBypassUntil = 0;
 let lastCounterReadAt = 0;
 let lastBoostReadAt = 0;
 let lastFullReadAt = 0;
@@ -235,6 +237,8 @@ function invalidateViewportCache() {
 function invalidateMicroCrops() {
   boostMicroCrop = undefined;
   counterMicroCrop = undefined;
+  boostMicroFailureStreak = 0;
+  boostMicroBypassUntil = 0;
 }
 
 async function sendOffscreenControl(message: OffscreenControlRequest) {
@@ -595,7 +599,8 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
   const attempt = async (profile: OcrCropProfile, forceBase = false): Promise<SkillStateSnapshot> => {
     const view = await viewport();
     const key = microCalibrationKey(profile, view);
-    const stored = !forceBase && boostMicroCrop?.key === key ? boostMicroCrop : undefined;
+    const microAllowed = Date.now() >= boostMicroBypassUntil;
+    const stored = !forceBase && microAllowed && boostMicroCrop?.key === key ? boostMicroCrop : undefined;
     if (options.fastOnly && !stored) return { state: "unknown", raw: "fast-only probe has no calibrated micro crop" };
     let response = await captureOcr("boost", profile, {
       workClass,
@@ -626,21 +631,18 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
 
     if (response.usedMicro && skill.state === "unknown") {
       if (options.fastOnly) return skill;
-      const critical = workClass === "boost-critical";
-      // A single ordinary sync miss is not enough reason to throw away a
-      // calibrated micro crop and launch a larger capture. v0.3.5 did that on
-      // every miss and the live clip showed visible renderer stalls around
-      // fallback activity. Keep the crop for one later sync; critical reads may
-      // still use one same-profile base fallback immediately.
-      if (!critical && boostMisses < 2) {
-        log("Chopping micro-crop was unclear once; keeping calibration and deferring broad fallback.", "debug", {
-          category: "ocr", event: "micro.miss_deferred"
-        });
-        return skill;
-      }
+      boostMicroFailureStreak += 1;
       boostMicroCrop = undefined;
-      boostMisses = 0;
-      log("Chopping micro-crop remained unclear; retrying the safe same-profile Chopping crop once.", "warn", { category: "ocr", event: "micro.fallback" });
+      if (boostMicroFailureStreak >= 2) {
+        boostMicroBypassUntil = Date.now() + 60_000;
+        log("Chopping micro-crop failed twice; bypassing micro OCR for 60s and using one same-profile Chopping read per scheduled sync.", "warn", {
+          category: "ocr", event: "micro.bypass", details: { bypassMs: 60_000, failureStreak: boostMicroFailureStreak }
+        });
+      } else {
+        log("Chopping micro-crop was unclear; retrying the safe same-profile Chopping crop immediately instead of waiting for another sync.", "debug", {
+          category: "ocr", event: "micro.immediate_fallback", details: { failureStreak: boostMicroFailureStreak }
+        });
+      }
       response = await captureOcr("boost", profile, {
         workClass,
         generation,
@@ -650,6 +652,8 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
       if (!response.usedMicro && response.microRect && skill.state !== "unknown") {
         boostMicroCrop = { key: response.calibrationKey, rect: response.microRect };
       }
+    } else if (response.usedMicro && skill.state !== "unknown") {
+      boostMicroFailureStreak = 0;
     }
 
     if (skill.state === "unknown") return skill;
@@ -700,9 +704,10 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
     if (skill.state !== "unknown") return skill;
     if (options.fastOnly || options.noProfileFallback) return skill;
 
-    if (boostMisses < 2) {
+    const criticalProfileRecovery = workClass === "boost-critical";
+    if (!criticalProfileRecovery && boostMisses < 1) {
       boostMisses += 1;
-      log(`Chopping OCR miss ${boostMisses}/2 on the active profile; deferring multi-profile recovery to avoid a renderer spike.`, "debug", {
+      log("Chopping same-profile OCR missed once; deferring multi-profile recovery for one normal sync to avoid a renderer spike.", "debug", {
         category: "ocr", event: "boost.profile_recovery_deferred"
       });
       return skill;

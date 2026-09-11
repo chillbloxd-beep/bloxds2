@@ -197,9 +197,9 @@ async function setRecognitionParameters(worker: Worker, mode: OcrMode, micro: bo
 
   if (micro && mode === "boost") {
     await worker.setParameters({
-      tessedit_pageseg_mode: PSM.SINGLE_WORD,
-      preserve_interword_spaces: "0",
-      tessedit_char_whitelist: "ReadyACTIVEactive0123456789sSOoIl|"
+      tessedit_pageseg_mode: PSM.SINGLE_LINE,
+      preserve_interword_spaces: "1",
+      tessedit_char_whitelist: "SkillskillReadyACTIVEactive0123456789sSOoIl|:="
     });
     return;
   }

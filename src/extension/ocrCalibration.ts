@@ -78,20 +78,20 @@ function normalizedRect(
 /**
  * Chopping's changing value (`Ready`, `Active`, `153s`, ...) is not a stable
  * calibration anchor. The literal `Skill:` label immediately to its left is.
- * Anchor the recurring micro-crop to that fixed word and capture only the value
- * cell to its right. This keeps geometry stable across the whole cooldown cycle
- * and gives the single-word OCR path more vertical breathing room.
+ * Capture the stable label AND its value as one small line. The extra context
+ * costs little compared with the base Chopping crop but is substantially more
+ * robust than OCRing a value-only sliver at different UI scales.
  */
-function normalizedSkillValueRect(
+function normalizedSkillCellRect(
   skillAnchor: HocrWord,
   imageWidth: number,
   imageHeight: number
 ): RelativeOcrRect | undefined {
   if (imageWidth <= 0 || imageHeight <= 0) return undefined;
   const wordHeight = Math.max(1, skillAnchor.y1 - skillAnchor.y0);
-  const left = Math.max(0, Math.min(imageWidth - 1, skillAnchor.x1 + wordHeight * 0.12));
-  const targetWidth = Math.min(imageWidth - left, imageWidth * 0.34);
-  const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.28, wordHeight * 2.8));
+  const left = Math.max(0, skillAnchor.x0 - wordHeight * 0.25);
+  const targetWidth = Math.min(imageWidth - left, imageWidth * 0.50);
+  const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.30, wordHeight * 3.0));
   const centerY = (skillAnchor.y0 + skillAnchor.y1) / 2;
   const top = Math.max(0, Math.min(imageHeight - targetHeight, centerY - targetHeight / 2));
   return {
@@ -133,7 +133,7 @@ export function findBoostStateRect(
     });
   const skillAnchor = anchors[0];
   if (!skillAnchor) return undefined;
-  return normalizedSkillValueRect(skillAnchor, imageWidth, imageHeight);
+  return normalizedSkillCellRect(skillAnchor, imageWidth, imageHeight);
 }
 
 function numericTokenScore(value: string) {
