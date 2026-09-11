@@ -25,11 +25,16 @@ function decodeSimpleHtml(value: string) {
     .trim();
 }
 
-/** Parse only the word boxes we need from Tesseract hOCR. */
+/**
+ * Parse only Tesseract word spans. hOCR nests `ocrx_word` spans inside line
+ * spans, so the matcher deliberately accepts only spans whose body contains no
+ * child tag. A generic nested-span regex can consume an entire line up to the
+ * first word's closing tag and silently skip that first word.
+ */
 export function parseHocrWords(hocr?: string | null): HocrWord[] {
   if (!hocr) return [];
   const words: HocrWord[] = [];
-  const spanPattern = /<span\b([^>]*)>([\s\S]*?)<\/span>/gi;
+  const spanPattern = /<span\b([^>]*)>([^<]*)<\/span>/gi;
   let match: RegExpExecArray | null;
   while ((match = spanPattern.exec(hocr))) {
     const attributes = match[1];
