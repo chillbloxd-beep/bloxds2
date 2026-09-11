@@ -22,6 +22,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The helper is removed before validation/commit and never ships.
       - name: Apply final hardening
         run: python3 scripts/harden-v037-final.py
       - name: Remove hardening-only helpers
