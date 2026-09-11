@@ -125,6 +125,7 @@ for (const temp of [
   "scripts/repair-v036-patch-script.py",
   "scripts/fix-v036-crop-stability.py",
   "scripts/tune-v036-runtime.py",
+  "scripts/guard-v036-rapid-confirm.py",
   ".github/workflows/apply-v036-fixes.yml",
   ".github/workflows/tune-v036-runtime.yml"
 ]) {
@@ -136,7 +137,7 @@ for (const stale of ["default every 5 seconds", "side-panel status polling also 
   expect(!readme.includes(stale), `README still contains stale behavior: ${stale}`);
 }
 expect(readme.includes("never opened automatically"), "README does not document manual-only monitor behavior");
-expect(readme.includes("deep-sleep"), "README does not document cooldown deep-sleep behavior");
+expect(/Chopping cooldown:\s*sleep between scheduled tiny reads/i.test(readme), "README does not document cooldown sleep behavior");
 expect(readme.includes("v0.3.6"), "README does not identify the v0.3.6 fix release");
 
 console.log("Extension audit passed: v0.3.6 source, live-regression safeguards, passive monitor, low-overhead scheduling, build output and OCR assets are internally consistent.");
