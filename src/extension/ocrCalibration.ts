@@ -87,9 +87,11 @@ function normalizedStateCellRect(
   imageHeight: number
 ): RelativeOcrRect | undefined {
   if (imageWidth <= 0 || imageHeight <= 0) return undefined;
-  const wordWidth = word.x1 - word.x0;
   const wordHeight = word.y1 - word.y0;
-  const targetWidth = Math.min(imageWidth, Math.max(imageWidth * 0.34, wordWidth * 2.2));
+  // Fixed cell dimensions are intentional: centering width on the token itself
+  // made Ready/Active/149s produce different rectangles. The Skill value cell
+  // is right-aligned, so its capture geometry must not depend on token width.
+  const targetWidth = Math.min(imageWidth, imageWidth * 0.42);
   const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.22, wordHeight * 2.4));
   const right = Math.min(imageWidth, word.x1 + wordHeight * 1.4);
   const left = Math.max(0, Math.min(imageWidth - targetWidth, right - targetWidth));

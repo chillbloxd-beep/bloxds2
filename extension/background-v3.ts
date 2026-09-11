@@ -2,7 +2,7 @@ import type { MiningSession, SidebarSnapshot, SkillStateSnapshot } from "../src/
 import { cropRegion, isUsableSnapshot, profileOrder, snapshotScore, type OcrViewport } from "../src/extension/crop";
 import { isOneBlockUrl, lobbyFromUrl } from "../src/extension/parser";
 import type { RelativeOcrRect } from "../src/extension/ocrCalibration";
-import { OcrDeadlineError, PriorityOcrQueue, cooldownSyncDelayMs, isStaleObservation, precisionProbePlan, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
+import { OcrDeadlineError, PriorityOcrQueue, cooldownReadyEstimateMs, cooldownSamplesAgree, cooldownSyncDelayMs, isStaleObservation, precisionProbePlan, transitionVerdict, type OcrWorkClass } from "../src/extension/reliability";
 import type {
   ActiveExtensionSession,
   BackgroundCommand,
@@ -84,6 +84,10 @@ let lastAcceptedBoostCaptureAt = 0;
 let boostMicroCrop: { key: string; rect: RelativeOcrRect } | undefined;
 let counterMicroCrop: { key: string; rect: RelativeOcrRect } | undefined;
 let fastBoostHits = 0;
+let fastRecognizerReady = false;
+let provisionalCooldown: { seconds: number; captureAt: number } | undefined;
+let cooldownRecoveryCandidate: { seconds: number; captureAt: number } | undefined;
+let cooldownRecoveryPending = false;
 let cooldownUncertaintySec = 2;
 let nextCooldownSyncAt = 0;
 let pendingTransitionConfirm: { state: "ready" | "active"; captureAt: number } | undefined;
@@ -388,6 +392,7 @@ async function captureOcr(
     if (!response.ok) throw new Error(`${response.error || "OCR failed"} [${mode}/${profile}]`);
     recordOcr(response);
     lastRecognitionMethod = response.recognitionMethod;
+    if (response.fastRecognizerReady !== undefined) fastRecognizerReady = response.fastRecognizerReady;
     log(`OCR ${mode} completed via ${response.recognitionMethod || "unknown"}.`, "debug", {
       category: "ocr",
       event: "ocr.result",
@@ -581,7 +586,7 @@ async function readCounter(): Promise<number | undefined> {
   }
 }
 
-async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fastOnly?: boolean } = {}): Promise<SkillStateSnapshot> {
+async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fastOnly?: boolean; noProfileFallback?: boolean } = {}): Promise<SkillStateSnapshot> {
   const generation = ++boostGeneration;
   const requestedBoostEpoch = boostStateEpoch;
 
@@ -678,7 +683,7 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
     let profiles = orderedProfiles(initialView);
     let skill = await attempt(profiles[0]);
     if (skill.state !== "unknown") return skill;
-    if (options.fastOnly) return skill;
+    if (options.fastOnly || options.noProfileFallback) return skill;
 
     boostMisses += 1;
     invalidateViewportCache();
@@ -704,27 +709,98 @@ async function readBoost(workClass: OcrWorkClass = "boost-sync", options: { fast
 function applyBoostObservation(skill: SkillStateSnapshot, captureAt: number) {
   const previousPrediction = predictedReadyAt;
   if (skill.state === "cooldown" && skill.cooldownSeconds !== undefined) {
-    const observedReadyAt = captureAt + skill.cooldownSeconds * 1000;
-    if (previousPrediction !== undefined && previousPrediction > captureAt) {
-      const drift = (observedReadyAt - previousPrediction) / 1000;
-      const predictedSeconds = Math.max(0, Math.ceil((previousPrediction - captureAt) / 1000));
-      if (Math.abs(drift) > 6) {
-        rejectedOcrCount += 1;
-        boostDriftSeconds = drift;
-        cooldownUncertaintySec = Math.min(10, Math.max(cooldownUncertaintySec, Math.abs(drift)));
-        log(`Suspicious cooldown OCR: screen ${skill.cooldownSeconds}s vs predicted ${predictedSeconds}s (${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s). Keeping the prior prediction.`, "warn", {
-          category: "timer", event: "cooldown.rejected", details: { observedSeconds: skill.cooldownSeconds, predictedSeconds, driftSeconds: drift }
+    const sample = { seconds: skill.cooldownSeconds, captureAt };
+    const observedReadyAt = cooldownReadyEstimateMs(sample);
+
+    // v0.3.5 could permanently lock onto one bad first cooldown OCR (the live
+    // clip showed 185s while Bloxd displayed ~149s). The first post-Active
+    // numeric value is now provisional until a second time-consistent sample
+    // predicts the same Ready boundary.
+    if (previousPrediction === undefined || previousPrediction <= captureAt) {
+      if (!provisionalCooldown) {
+        provisionalCooldown = sample;
+        cooldownRecoveryCandidate = undefined;
+        cooldownRecoveryPending = false;
+        cooldownUncertaintySec = Math.max(3, cooldownUncertaintySec);
+        boostDriftSeconds = undefined;
+        setChoppingSkill(skill);
+        log(`Cooldown anchor provisional: ${skill.cooldownSeconds}s. Confirming with a second fresh read before trusting the timer.`, "debug", {
+          category: "timer", event: "cooldown.provisional", details: { seconds: skill.cooldownSeconds, captureAt }
         });
-        setChoppingSkill({ state: "cooldown", cooldownSeconds: predictedSeconds, raw: skill.raw });
         return;
       }
-      boostDriftSeconds = drift;
-      cooldownUncertaintySec = Math.max(0.5, Math.min(8, cooldownUncertaintySec * 0.6 + Math.abs(drift) * 0.8));
-      if (Math.abs(drift) >= 0.5) log(`Cooldown sync: screen ${skill.cooldownSeconds}s · drift ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s → resynced.`);
-    } else {
+
+      if (!cooldownSamplesAgree(provisionalCooldown, sample)) {
+        rejectedOcrCount += 1;
+        log(`Cooldown anchor mismatch: ${provisionalCooldown.seconds}s then ${skill.cooldownSeconds}s. Replacing the untrusted first sample and confirming again.`, "warn", {
+          category: "timer", event: "cooldown.provisional_rejected", details: {
+            firstSeconds: provisionalCooldown.seconds,
+            secondSeconds: skill.cooldownSeconds,
+            firstReadyAt: cooldownReadyEstimateMs(provisionalCooldown),
+            secondReadyAt: observedReadyAt
+          }
+        });
+        provisionalCooldown = sample;
+        cooldownUncertaintySec = Math.min(10, Math.max(4, cooldownUncertaintySec));
+        setChoppingSkill(skill);
+        return;
+      }
+
+      predictedReadyAt = observedReadyAt;
+      boostCooldownReadyAt = observedReadyAt;
+      provisionalCooldown = undefined;
+      cooldownRecoveryCandidate = undefined;
+      cooldownRecoveryPending = false;
       boostDriftSeconds = undefined;
-      cooldownUncertaintySec = 2;
+      cooldownUncertaintySec = 1.5;
+      setChoppingSkill(skill);
+      log(`Cooldown anchor confirmed from two consistent samples; predicted Ready ${new Date(observedReadyAt).toLocaleTimeString()}.`, "info", {
+        category: "timer", event: "cooldown.anchor_confirmed", details: { seconds: skill.cooldownSeconds, predictedReadyAt: observedReadyAt }
+      });
+      return;
     }
+
+    const drift = (observedReadyAt - previousPrediction) / 1000;
+    const predictedSeconds = Math.max(0, Math.ceil((previousPrediction - captureAt) / 1000));
+    if (Math.abs(drift) > 6) {
+      // One large disagreement is still rejected, but two fresh samples that
+      // agree with each other are a recovery quorum. This prevents a bad old
+      // prediction from causing every later correct OCR reading to be rejected.
+      if (cooldownRecoveryCandidate
+        && captureAt - cooldownRecoveryCandidate.captureAt <= 3_000
+        && cooldownSamplesAgree(cooldownRecoveryCandidate, sample)) {
+        const oldPrediction = previousPrediction;
+        predictedReadyAt = observedReadyAt;
+        boostCooldownReadyAt = observedReadyAt;
+        cooldownRecoveryCandidate = undefined;
+        cooldownRecoveryPending = false;
+        boostDriftSeconds = drift;
+        cooldownUncertaintySec = 1.5;
+        setChoppingSkill(skill);
+        log(`Cooldown prediction recovered after two mutually-consistent outliers: ${new Date(oldPrediction).toLocaleTimeString()} → ${new Date(observedReadyAt).toLocaleTimeString()}.`, "warn", {
+          category: "timer", event: "cooldown.recovered", details: { driftSeconds: drift, seconds: skill.cooldownSeconds }
+        });
+        return;
+      }
+
+      rejectedOcrCount += 1;
+      cooldownRecoveryCandidate = sample;
+      cooldownRecoveryPending = true;
+      boostDriftSeconds = drift;
+      cooldownUncertaintySec = Math.min(10, Math.max(cooldownUncertaintySec, Math.abs(drift)));
+      log(`Suspicious cooldown OCR: screen ${skill.cooldownSeconds}s vs predicted ${predictedSeconds}s (${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s). Holding the old timer only until a rapid quorum check.`, "warn", {
+        category: "timer", event: "cooldown.recovery_candidate", details: { observedSeconds: skill.cooldownSeconds, predictedSeconds, driftSeconds: drift }
+      });
+      setChoppingSkill({ state: "cooldown", cooldownSeconds: predictedSeconds, raw: skill.raw });
+      return;
+    }
+
+    provisionalCooldown = undefined;
+    cooldownRecoveryCandidate = undefined;
+    cooldownRecoveryPending = false;
+    boostDriftSeconds = drift;
+    cooldownUncertaintySec = Math.max(0.5, Math.min(8, cooldownUncertaintySec * 0.6 + Math.abs(drift) * 0.8));
+    if (Math.abs(drift) >= 0.5) log(`Cooldown sync: screen ${skill.cooldownSeconds}s · drift ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}s → resynced.`);
     predictedReadyAt = observedReadyAt;
     boostCooldownReadyAt = observedReadyAt;
   } else if (skill.state === "ready") {
@@ -732,9 +808,15 @@ function applyBoostObservation(skill: SkillStateSnapshot, captureAt: number) {
       boostDriftSeconds = (captureAt - previousPrediction) / 1000;
       cooldownUncertaintySec = Math.max(0.5, Math.min(8, Math.abs(boostDriftSeconds)));
     }
+    provisionalCooldown = undefined;
+    cooldownRecoveryCandidate = undefined;
+    cooldownRecoveryPending = false;
     predictedReadyAt = captureAt;
     boostCooldownReadyAt = captureAt;
   } else if (skill.state === "active") {
+    provisionalCooldown = undefined;
+    cooldownRecoveryCandidate = undefined;
+    cooldownRecoveryPending = false;
     predictedReadyAt = undefined;
     boostCooldownReadyAt = undefined;
     boostDriftSeconds = undefined;
@@ -788,8 +870,9 @@ function scheduleActiveCheck() {
 }
 
 function scheduleRecheck(seconds = settings.readyRetrySec) {
-  const actualSeconds = quickTransitionConfirm ? Math.min(seconds, 0.3) : seconds;
-  quickTransitionConfirm = false;
+  const actualSeconds = quickTransitionConfirm ? Math.min(seconds, 0.15) : seconds;
+  // Do not clear quickTransitionConfirm here. The wake handler needs to know
+  // that this is the second observation of an unexpectedly early Ready/Active.
   void scheduleOffscreenWake("boost-sync", Date.now() + actualSeconds * 1000);
 }
 
@@ -807,7 +890,7 @@ function scheduleCounter(delayMs?: number) {
 async function counterWake() {
   if (connectedTabId === undefined) return;
   const nearReady = settings.autoBoost && predictedReadyAt !== undefined
-    && predictedReadyAt - Date.now() <= settings.precisionWindowSec * 1000 + 1_000;
+    && predictedReadyAt - Date.now() <= settings.precisionWindowSec * 1000 + 2_000;
   if (precisionWindowActive || nearReady) {
     log("Blocks counter wake deferred because Chopping is near or inside the precision Ready window.", "debug", {
       category: "counter", event: "counter.deferred", details: { precisionWindowActive, nearReady }
@@ -841,6 +924,9 @@ async function keyE() {
     windowsVirtualKeyCode: 69,
     nativeVirtualKeyCode: 69
   });
+  // v0.3.5 occasionally dispatched an E down/up pair too quickly for Bloxd to
+  // observe. Hold the key across at least one typical render/input slice.
+  await delay(25);
   await debuggerCommand("Input.dispatchKeyEvent", {
     type: "keyUp",
     key: "e",
@@ -911,7 +997,11 @@ function scheduleCooldownMonitoring() {
     category: "timer", event: "sleep.enter", details: { sleepMs: syncDelayMs, remainingMs, uncertaintySec: cooldownUncertaintySec }
   });
   void scheduleOffscreenWake("boost-sync", nextCooldownSyncAt);
-  const precisionAt = Math.max(now + 50, predictedReadyAt - settings.precisionWindowSec * 1000);
+  // Bloxd displays whole seconds, so a visible `2s` is an interval rather than
+  // an exact 2.000-second boundary. Start the cheap watcher 1.5s early so a
+  // real Ready is observed promptly instead of waiting for the local timer to 0.
+  const precisionLeadMs = settings.precisionWindowSec * 1000 + 1_500;
+  const precisionAt = Math.max(now + 50, predictedReadyAt - precisionLeadMs);
   void scheduleOffscreenWake("boost-precision", precisionAt);
   void chrome.alarms.clear(BOOST_WAKE).then(() => {
     chrome.alarms.create(BOOST_WAKE, { when: Math.max(Date.now() + 1000, predictedReadyAt!) });
@@ -919,29 +1009,50 @@ function scheduleCooldownMonitoring() {
 }
 
 function scheduleCooldown(seconds: number) {
-  boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
   const captureAt = lastBoostCaptureAt || Date.now();
-  predictedReadyAt = captureAt + seconds * 1000;
+  precisionWindowActive = false;
+  boostCycle = undefined;
+  boostStateEpoch += 1;
+
+  // applyBoostObservation owns cooldown authority. If there is still no trusted
+  // prediction, this was only the first/provisional numeric sample (or a
+  // replacement after mismatch). Confirm again quickly while the game is in a
+  // harmless cooldown rather than letting one OCR error anchor the whole cycle.
+  if (predictedReadyAt === undefined) {
+    setPowerState("sync");
+    log(`Cooldown ${seconds}s is not trusted yet; confirming the anchor again in 0.45s.`, "debug", {
+      category: "timer", event: "cooldown.anchor_wait", details: { seconds, captureAt }
+    });
+    void scheduleOffscreenWake("boost-active", Date.now() + 450);
+    return;
+  }
+
+  boostTotals.cooldownsRead = [...boostTotals.cooldownsRead, seconds].slice(-100);
   boostCooldownReadyAt = predictedReadyAt;
   boostWakeAt = predictedReadyAt + settings.cooldownSafetySec * 1000;
   lastCooldownSyncAt = captureAt;
-  precisionWindowActive = false;
-  setChoppingSkill({ state: "cooldown", cooldownSeconds: seconds, raw: choppingSkill.raw });
-  log(`Cooldown read: ${seconds}s at screenshot time. Adaptive sync stays at or below ${settings.cooldownSyncIntervalSec}s and tightens near Ready; predicted Ready ${new Date(predictedReadyAt).toLocaleTimeString()}.`);
-  boostCycle = undefined;
-  boostStateEpoch += 1;
+  log(`Cooldown anchor trusted at ${seconds}s. Adaptive sync stays at or below ${settings.cooldownSyncIntervalSec}s; predicted Ready ${new Date(predictedReadyAt).toLocaleTimeString()}.`);
   scheduleCooldownMonitoring();
 }
 
 async function syncCooldown() {
-  if (!settings.autoBoost || connectedTabId === undefined || boostFault || !predictedReadyAt) return;
+  if (!settings.autoBoost || connectedTabId === undefined || boostFault) return;
+  // A provisional first cooldown sample has no predictedReadyAt yet; active
+  // checks own that confirmation path.
+  if (!predictedReadyAt && !quickTransitionConfirm) return;
   setPowerState("sync");
   lastCooldownSyncAt = Date.now();
   const before = predictedReadyAt;
+  const wasRapidTransitionConfirm = quickTransitionConfirm;
   try {
-    const observed = await readBoost("boost-sync");
+    const observed = await readBoost(
+      wasRapidTransitionConfirm ? "boost-critical" : "boost-sync",
+      { noProfileFallback: wasRapidTransitionConfirm }
+    );
     if (observed.state === "ready") {
-      log("Cooldown sync saw actual Ready. Activating immediately.");
+      log(wasRapidTransitionConfirm
+        ? "Unexpected Ready was confirmed by a second fresh read; overriding the stale timer and activating immediately."
+        : "Cooldown sync saw actual Ready. Activating immediately.");
       await beginBoostCycle();
       return;
     }
@@ -951,19 +1062,34 @@ async function syncCooldown() {
       return;
     }
     if (observed.state === "cooldown" && observed.cooldownSeconds !== undefined) {
-      const adjustment = predictedReadyAt === undefined ? 0 : (predictedReadyAt - before) / 1000;
+      if (cooldownRecoveryPending) {
+        log("Large cooldown disagreement needs one rapid quorum read before either timer is trusted.", "debug", {
+          category: "timer", event: "cooldown.recovery_check"
+        });
+        void scheduleOffscreenWake("boost-sync", Date.now() + 350);
+        return;
+      }
+      const adjustment = before === undefined || predictedReadyAt === undefined ? 0 : (predictedReadyAt - before) / 1000;
       log(`Chopping sync: screen ${observed.cooldownSeconds}s${Math.abs(adjustment) >= 0.05 ? ` · adjusted ${adjustment >= 0 ? "+" : ""}${adjustment.toFixed(2)}s` : " · matched prediction"}.`);
       scheduleCooldownMonitoring();
       return;
     }
-    if (quickTransitionConfirm) {
-      scheduleRecheck(0.3);
-      return;
+    if (wasRapidTransitionConfirm && pendingTransitionConfirm) {
+      const ageMs = Date.now() - pendingTransitionConfirm.captureAt;
+      if (ageMs < 750) {
+        scheduleRecheck(0.15);
+        return;
+      }
+      pendingTransitionConfirm = undefined;
+      quickTransitionConfirm = false;
+      log("Rapid transition confirmation expired without a second matching read; retaining the prior safe state.", "debug", {
+        category: "chopping", event: "transition.confirm_expired"
+      });
     }
-    scheduleCooldownMonitoring();
+    if (predictedReadyAt !== undefined) scheduleCooldownMonitoring();
   } catch (error) {
     log(`Chopping sync failed: ${errorText(error)}. Keeping the last good prediction.`, "warn");
-    scheduleCooldownMonitoring();
+    if (predictedReadyAt !== undefined) scheduleCooldownMonitoring();
   }
 }
 
@@ -979,9 +1105,18 @@ function enterPrecisionWindow() {
 async function precisionBoostTick() {
   if (!precisionWindowActive || !settings.autoBoost || connectedTabId === undefined || boostFault || boostCycle) return;
   const remainingMs = predictedReadyAt === undefined ? 0 : predictedReadyAt - Date.now();
-  const plan = precisionProbePlan({ remainingMs, hasMicroCrop: Boolean(boostMicroCrop) });
+  const plan = precisionProbePlan({
+    remainingMs,
+    hasMicroCrop: Boolean(boostMicroCrop),
+    fastRecognizerReady
+  });
   try {
-    const observed = await readBoost("boost-critical", { fastOnly: plan.fastOnly });
+    const observed = await readBoost("boost-critical", {
+      fastOnly: plan.fastOnly,
+      // Precision is allowed one safe same-profile fallback, but never a
+      // multi-profile hunt that can visibly stall the game near Ready.
+      noProfileFallback: true
+    });
     if (observed.state === "ready") {
       precisionWindowActive = false;
       const finishedAt = Date.now();
@@ -998,7 +1133,7 @@ async function precisionBoostTick() {
     }
     if (observed.state === "cooldown" && predictedReadyAt !== undefined) {
       const left = predictedReadyAt - Date.now();
-      if (left > settings.precisionWindowSec * 1000 + 1000) {
+      if (left > (settings.precisionWindowSec + 2) * 1000) {
         precisionWindowActive = false;
         log("Precision window moved back after cooldown re-sync; returning to low-overhead monitoring.", "info", { category: "timer", event: "precision.exit" });
         scheduleCooldownMonitoring();
@@ -1009,7 +1144,7 @@ async function precisionBoostTick() {
     log(`Precision Chopping read: ${errorText(error)}`, "warn", { category: "chopping", event: "precision.error" });
   }
   if (precisionWindowActive) {
-    const nextDelayMs = quickTransitionConfirm ? Math.min(250, plan.nextDelayMs) : plan.nextDelayMs;
+    const nextDelayMs = quickTransitionConfirm ? Math.min(150, plan.nextDelayMs) : plan.nextDelayMs;
     void scheduleOffscreenWake("boost-precision", Date.now() + nextDelayMs);
   }
 }
@@ -1182,6 +1317,10 @@ async function disconnect(reason = "Disconnected") {
   lastAcceptedBoostGeneration = 0;
   lastAcceptedCounterCaptureAt = 0;
   lastAcceptedBoostCaptureAt = 0;
+  fastRecognizerReady = false;
+  provisionalCooldown = undefined;
+  cooldownRecoveryCandidate = undefined;
+  cooldownRecoveryPending = false;
   cooldownUncertaintySec = 2;
   nextCooldownSyncAt = 0;
   pendingTransitionConfirm = undefined;
@@ -1257,9 +1396,16 @@ async function doConnect(tabId: number) {
   log(`Connected to One Block${lobbyFromUrl(tab.url) ? ` lobby ${lobbyFromUrl(tab.url)}` : ""}.`);
 
   try {
-    const snapshot = await readFullSnapshot(true);
+    let snapshot = await readFullSnapshot(true);
     if (snapshot.blocksMined === undefined) {
       log("Connected, but the initial OCR did not find Blocks mined. Use Recalibrate OCR if the sidebar is visible.", "warn");
+    }
+    if (!snapshot.phase) {
+      log("Initial sidebar snapshot missed Phase; retrying full metadata once before normal low-overhead operation.", "debug", {
+        category: "ocr", event: "metadata.retry"
+      });
+      snapshot = await readFullSnapshot(true);
+      if (!snapshot.phase) log("Phase remained unreadable after the one connection-time retry; continuing without inventing it.", "warn");
     }
   } catch (error) {
     log(`Initial OCR: ${errorText(error)}`, "warn");
@@ -1529,6 +1675,7 @@ function status(): LiveExtensionStatus {
     dumbModeArmed,
     ocrQueueDepth: ocrQueue.depth,
     fastBoostHits,
+    fastRecognizerReady,
     boostMicroCalibrated: Boolean(boostMicroCrop),
     counterMicroCalibrated: Boolean(counterMicroCrop),
     powerState: boostFault ? "fault" : powerState,
