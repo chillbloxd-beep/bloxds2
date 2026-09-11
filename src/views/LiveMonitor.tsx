@@ -29,13 +29,6 @@ function formatDuration(ms: number) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function median(values: number[]) {
-  if (!values.length) return undefined;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
 const categories: Array<"all" | DiagnosticCategory> = ["all", "chopping", "ocr", "timer", "input", "counter", "session", "system"];
 
 type Density = "mini" | "monitor" | "diagnostic";

@@ -534,7 +534,10 @@ async function readCounter(): Promise<number | undefined> {
     const value = response.blocksMined;
     if (value === undefined) return undefined;
     if (lastCounter && value < lastCounter.value) {
-      log(`Rejected counter OCR ${value.toLocaleString()} because Blocks mined cannot decrease from ${lastCounter.value.toLocaleString()} on the same connected island.`, "warn");
+      rejectedOcrCount += 1;
+      log(`Rejected counter OCR ${value.toLocaleString()} because Blocks mined cannot decrease from ${lastCounter.value.toLocaleString()} on the same connected island.`, "warn", {
+        category: "counter", event: "counter.rejected", details: { observed: value, previous: lastCounter.value }
+      });
       return undefined;
     }
 
@@ -803,8 +806,12 @@ function scheduleCounter(delayMs?: number) {
 
 async function counterWake() {
   if (connectedTabId === undefined) return;
-  if (precisionWindowActive) {
-    log("Blocks counter wake deferred because Chopping is in the precision Ready window.", "debug", { category: "counter", event: "counter.deferred" });
+  const nearReady = settings.autoBoost && predictedReadyAt !== undefined
+    && predictedReadyAt - Date.now() <= settings.precisionWindowSec * 1000 + 1_000;
+  if (precisionWindowActive || nearReady) {
+    log("Blocks counter wake deferred because Chopping is near or inside the precision Ready window.", "debug", {
+      category: "counter", event: "counter.deferred", details: { precisionWindowActive, nearReady }
+    });
     scheduleCounter(1_000);
     return;
   }
@@ -1001,7 +1008,10 @@ async function precisionBoostTick() {
   } catch (error) {
     log(`Precision Chopping read: ${errorText(error)}`, "warn", { category: "chopping", event: "precision.error" });
   }
-  if (precisionWindowActive) void scheduleOffscreenWake("boost-precision", Date.now() + plan.nextDelayMs);
+  if (precisionWindowActive) {
+    const nextDelayMs = quickTransitionConfirm ? Math.min(250, plan.nextDelayMs) : plan.nextDelayMs;
+    void scheduleOffscreenWake("boost-precision", Date.now() + nextDelayMs);
+  }
 }
 
 async function beginBoostCycle() {
@@ -1603,7 +1613,6 @@ async function handleCommand(command: BackgroundCommand): Promise<BackgroundResp
   try {
     switch (command.type) {
       case "GET_STATUS":
-        await reconcileConnection();
         return { ok: true, status: status() };
       case "SET_SETTINGS":
         await setSettings(command.patch);
