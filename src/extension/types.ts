@@ -3,7 +3,7 @@ import type { RelativeOcrRect } from "./ocrCalibration";
 
 export type ExtensionConnectionMode = "manual" | "auto" | "dumb";
 export type OcrCropProfile = "afk-sidepanel" | "standard" | "broad";
-export type OffscreenWakeId = "boost-sync" | "boost-precision";
+export type OffscreenWakeId = "boost-sync" | "boost-precision" | "boost-verify" | "boost-active";
 
 export interface ExtensionSettings {
   mode: ExtensionConnectionMode;
