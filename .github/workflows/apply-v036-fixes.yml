@@ -23,14 +23,16 @@ jobs:
         run: python3 scripts/repair-v036-patch-script.py
       - name: Apply guarded source patch
         run: python3 scripts/apply-v036-background-fixes.py
+      - name: Stabilize Chopping state-cell crop
+        run: python3 scripts/fix-v036-crop-stability.py
       - run: npm install --no-audit --no-fund
       - run: npm test
       - run: npm run build:extension
-      - name: Commit only validated background changes
+      - name: Commit only validated product fixes
         run: |
           git config user.name "chillbloxd-beep"
           git config user.email "chill.bloxd@gmail.com"
-          git add extension/background-v3.ts
+          git add extension/background-v3.ts src/extension/ocrCalibration.ts
           test -n "$(git diff --cached --name-only)"
           git commit -m "Fix v0.3.6 live cooldown and Ready timing [v036-applied]"
           git push origin HEAD:fix/v036-live-reliability
