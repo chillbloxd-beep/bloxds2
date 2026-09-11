@@ -1,0 +1,40 @@
+name: Harden v0.3.5 source
+
+on:
+  push:
+    branches:
+      - feature/reliability-performance-v035
+    paths:
+      - scripts/harden-v035.py
+      - .github/workflows/harden-v035.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reliability-performance-v035
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply guarded hardening patch
+        run: python3 scripts/harden-v035.py
+      - name: Remove one-time hardening files
+        run: rm -f scripts/harden-v035.py .github/workflows/harden-v035.yml
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:extension
+      - run: npm run audit:extension
+      - name: Commit only after tests, builds and audit pass
+        run: |
+          git config user.name "OneBlock Analytics CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Harden v0.3.5 passive monitoring and precision scheduling"
+          git push origin HEAD:feature/reliability-performance-v035
