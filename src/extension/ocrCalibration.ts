@@ -75,6 +75,34 @@ function normalizedRect(
   };
 }
 
+/**
+ * Chopping's value is right-aligned in the Skill cell. Centering a micro crop
+ * on the currently recognized token made the crop move when `149s`, `Ready`
+ * and `Active` had different widths. Keep a wider, right-anchored cell instead
+ * so one calibration remains valid through the whole state cycle.
+ */
+function normalizedStateCellRect(
+  word: HocrWord,
+  imageWidth: number,
+  imageHeight: number
+): RelativeOcrRect | undefined {
+  if (imageWidth <= 0 || imageHeight <= 0) return undefined;
+  const wordWidth = word.x1 - word.x0;
+  const wordHeight = word.y1 - word.y0;
+  const targetWidth = Math.min(imageWidth, Math.max(imageWidth * 0.34, wordWidth * 2.2));
+  const targetHeight = Math.min(imageHeight, Math.max(imageHeight * 0.22, wordHeight * 2.4));
+  const right = Math.min(imageWidth, word.x1 + wordHeight * 1.4);
+  const left = Math.max(0, Math.min(imageWidth - targetWidth, right - targetWidth));
+  const centerY = (word.y0 + word.y1) / 2;
+  const top = Math.max(0, Math.min(imageHeight - targetHeight, centerY - targetHeight / 2));
+  return {
+    x: left / imageWidth,
+    y: top / imageHeight,
+    width: Math.min(imageWidth - left, targetWidth) / imageWidth,
+    height: Math.min(imageHeight - top, targetHeight) / imageHeight
+  };
+}
+
 function resemblesChopping(value: string) {
   return /^ch[o0]pp(?:ing|lng)$/i.test(value.replace(/[^a-z0-9]/gi, ""));
 }
@@ -107,12 +135,7 @@ export function findBoostStateRect(
     });
   const state = candidates[0];
   if (!state) return undefined;
-  return normalizedRect(state, imageWidth, imageHeight, {
-    padX: 0.75,
-    padY: 0.75,
-    minWidth: 0.24,
-    minHeight: 0.18
-  });
+  return normalizedStateCellRect(state, imageWidth, imageHeight);
 }
 
 function numericTokenScore(value: string) {
