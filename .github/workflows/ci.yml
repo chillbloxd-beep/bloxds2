@@ -25,15 +25,20 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run build:extension
+      - run: npm run audit:extension
       - name: Validate extension bundle
         run: |
           test -f dist-extension/manifest.json
           test -f dist-extension/background.js
           test -f dist-extension/sidepanel.html
+          test -f dist-extension/monitor.html
           test -f dist-extension/offscreen.html
           test -f dist-extension/ocr/worker.min.js
           test -f dist-extension/ocr/lang/eng.traineddata.gz
-          find dist-extension/ocr/core -type f -name 'tesseract-core*' | grep -q .
+          test -f dist-extension/ocr/core/tesseract-core.wasm.js
+          test -f dist-extension/ocr/core/tesseract-core-simd.wasm.js
+          test -f dist-extension/ocr/core/tesseract-core-lstm.wasm.js
+          test -f dist-extension/ocr/core/tesseract-core-simd-lstm.wasm.js
       - name: Upload extension ZIP artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
