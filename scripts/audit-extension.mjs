@@ -69,7 +69,8 @@ expect(background.includes("BOUNDARY_E_OFFSETS_MS"), "scheduled boundary E cover
 expect(background.includes('cancelOffscreenWake("counter")'), "counter blackout is missing near the activation boundary");
 expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter can still start during the critical input/verification window");
 expect(background.includes("noProfileFallback: true"), "final lock reads can still trigger multi-profile fallback hunting");
-expect(background.includes("micro.miss_deferred"), "single micro-crop misses still immediately trigger larger fallback work");
+expect(background.includes("micro.immediate_fallback"), "a failed Chopping micro-crop does not immediately retry the safe same-profile crop");
+expect(background.includes("micro.bypass"), "repeated Chopping micro-crop failures do not enter temporary bypass mode");
 expect(background.includes("boost.profile_recovery_deferred"), "multi-profile recovery is not staged after transient misses");
 expect(background.includes("await delay(25);"), "E key down/up still has no deliberate hold interval");
 expect(background.includes("metadata.retry"), "missing Phase metadata has no one-time connection retry");
@@ -84,7 +85,7 @@ expect(!boundaryBlock.includes("captureOcr("), "boundary input window performs s
 expect(!boundaryBlock.includes('event: "input.boundary_e"'), "boundary loop still logs/broadcasts every E dispatch");
 expect(boundaryBlock.includes("dispatchOffsets"), "boundary loop does not retain dispatch timing for one post-window summary");
 expect(background.includes('event: "boundary.rapid_ready_confirm"'), "unexpected early Ready does not get the 100ms final-lock confirmation path");
-expect(background.includes("if (!critical && boostMisses < 2)") && background.includes("if (boostMisses < 2)"), "ordinary Chopping misses are not staged before both same-profile and multi-profile recovery");
+expect(background.includes("boostMicroBypassUntil") && background.includes("criticalProfileRecovery"), "Chopping fallback does not adapt after repeated micro failures");
 expect(background.includes("setPowerState(\"deep-sleep\")"), "explicit deep-sleep state is missing");
 expect(background.includes("boundaryBurstRunning || Boolean(boostCycle) || nearReady"), "counter is not pre-deferred across the final lock/input/verification window");
 expect(background.includes("rejectedOcrCount"), "rejected-reading diagnostics are missing");
@@ -99,9 +100,9 @@ expect(reliability.includes("BOUNDARY_E_OFFSETS_MS"), "boundary E coverage const
 expect(reliability.includes("BOUNDARY_WAKE_LEAD_MS = 2_000"), "boundary wake does not reserve 1s of pre-focus headroom before the first E slot");
 
 const calibration = read("src/extension/ocrCalibration.ts");
-expect(calibration.includes("normalizedSkillValueRect"), "Skill:-anchored Chopping value crop helper is missing");
+expect(calibration.includes("normalizedSkillCellRect"), "Skill:-anchored Chopping cell crop helper is missing");
 expect(calibration.includes("resemblesSkillAnchor"), "Chopping crop is not anchored to the stable Skill: label");
-expect(calibration.includes("skillAnchor.x1"), "Chopping value crop does not start from the fixed Skill: anchor");
+expect(calibration.includes("skillAnchor.x0"), "Chopping cell crop does not include the fixed Skill: anchor");
 
 const offscreen = read("src/extension/offscreen.ts");
 expect(offscreen.includes("request.fastOnly"), "offscreen fast-only recognizer path is missing");
@@ -110,6 +111,8 @@ expect(offscreen.includes("function fastRecognizerReady()"), "offscreen does not
 expect(offscreen.includes("readyTemplates.length > 0 && activeTemplates.length > 0"), "fast classifier can run without both learned state classes");
 expect(offscreen.includes("if (!fastRecognizerReady()) return undefined"), "fast classifier does not fail closed before both template classes exist");
 expect(offscreen.includes('tessedit_char_whitelist: ""'), "full OCR does not clear the restrictive micro whitelist");
+expect(offscreen.includes("PSM.SINGLE_LINE"), "Chopping micro OCR is not configured as one stable Skill/value line");
+expect(offscreen.includes("SkillskillReady"), "Chopping micro whitelist does not include the Skill anchor text");
 
 const monitor = read("src/views/LiveMonitor.tsx");
 expect(monitor.includes('type: "GET_STATUS"'), "monitor cannot read cached status");
@@ -142,7 +145,9 @@ for (const temp of [
   ".github/workflows/apply-v036-fixes.yml",
   ".github/workflows/tune-v036-runtime.yml",
   "scripts/apply-v037-final.py",
-  ".github/workflows/apply-v037-final.yml"
+  ".github/workflows/apply-v037-final.yml",
+  "scripts/finish-v037-chopping-fallback.py",
+  ".github/workflows/finish-v037-chopping-fallback.yml"
 ]) {
   expect(!exists(temp), `temporary development file still present: ${temp}`);
 }
