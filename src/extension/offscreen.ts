@@ -86,10 +86,8 @@ async function imageElement(dataUrl: string): Promise<HTMLImageElement> {
 
 async function preprocess(dataUrl: string, mode: OcrMode, micro: boolean): Promise<HTMLCanvasElement> {
   const image = await imageElement(dataUrl);
-  // Full and base crops favour recognition robustness. Once a micro-crop is
-  // calibrated, less enlargement is needed and the recognition job is much
-  // smaller. We keep smoothing for reliability rather than chasing a risky
-  // preprocessing speed win without live measurements.
+  // Base crops favour recognition robustness. Micro-crops contain only one
+  // value token and can use less enlargement, reducing both canvas and OCR work.
   const multiplier = mode === "full" ? 1.85 : micro ? 2.0 : 2.3;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(image.naturalWidth * multiplier));
@@ -147,6 +145,9 @@ function rememberTemplate(label: "ready" | "active", signature: number[]) {
 }
 
 function fastBoostMatch(canvas: HTMLCanvasElement): { label: "ready" | "active"; score: number } | undefined {
+  // Never classify from a one-sided template set. Until Tesseract has confirmed
+  // at least one sample of both labels, the safe path is the Tesseract fallback.
+  if (readyTemplates.length === 0 || activeTemplates.length === 0) return undefined;
   const signature = imageSignature(canvas);
   if (!signature.length) return undefined;
   const bestReady = readyTemplates.reduce((best, item) => Math.max(best, normalizedCorrelation(item, signature)), -1);
@@ -155,8 +156,8 @@ function fastBoostMatch(canvas: HTMLCanvasElement): { label: "ready" | "active";
   const second = Math.min(bestReady, bestActive);
 
   // Conservative by design: a fast match is only accepted when it is almost
-  // identical to a previously Tesseract-confirmed state and clearly separated
-  // from the other label. Anything less falls back to Tesseract.
+  // identical to a Tesseract-confirmed state and clearly separated from the
+  // other state. Anything less is not authoritative.
   if (best < 0.985 || best - second < 0.03) return undefined;
   return { label: bestReady > bestActive ? "ready" : "active", score: best };
 }
@@ -173,7 +174,10 @@ async function setRecognitionParameters(worker: Worker, mode: OcrMode, micro: bo
     await worker.setParameters({
       tessedit_pageseg_mode: PSM.SPARSE_TEXT,
       preserve_interword_spaces: "1",
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:.,%|_-/()[] "
+      // Explicitly clear any restrictive micro-read whitelist left on the
+      // persistent worker so full before/after snapshots preserve arbitrary
+      // owner/banner text as faithfully as Tesseract can read it.
+      tessedit_char_whitelist: ""
     });
     return;
   }
@@ -221,7 +225,17 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
           elapsedMs,
           choppingSkill: { state: match.label, raw: match.label === "ready" ? "Ready" : "Active" },
           recognitionMethod: "fast-template",
+          fastAttempted: true,
           fastMatchedLabel: match.label
+        };
+      }
+      if (request.fastOnly) {
+        return {
+          ok: true,
+          rawText: "",
+          elapsedMs: Math.round(performance.now() - started),
+          choppingSkill: { state: "unknown", raw: "fast template miss" },
+          fastAttempted: true
         };
       }
     }
@@ -242,6 +256,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
         confidence,
         elapsedMs,
         recognitionMethod,
+        fastAttempted: false,
         snapshot: parseSidebarText(rawText, confidence)
       };
     }
@@ -259,6 +274,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
         confidence,
         elapsedMs,
         recognitionMethod,
+        fastAttempted: false,
         blocksMined,
         microRect
       };
@@ -283,6 +299,7 @@ async function recognize(request: OcrRequest): Promise<OcrResponse> {
       confidence,
       elapsedMs,
       recognitionMethod,
+      fastAttempted: Boolean(request.preferFast),
       choppingSkill,
       microRect
     };
@@ -303,7 +320,10 @@ function scheduleWake(id: OffscreenWakeId, when: number) {
   const delayMs = Math.max(0, when - Date.now());
   const handle = window.setTimeout(() => {
     wakeTimers.delete(id);
-    void chrome.runtime.sendMessage({ target: "background", type: "OFFSCREEN_WAKE", id });
+    void chrome.runtime.sendMessage({ target: "background", type: "OFFSCREEN_WAKE", id }).catch(() => {
+      // A transient service-worker startup failure is covered by the Chrome
+      // alarm/status-poll fallbacks; avoid an unhandled offscreen rejection.
+    });
   }, Math.min(delayMs, 2_147_000_000));
   wakeTimers.set(id, handle);
 }
