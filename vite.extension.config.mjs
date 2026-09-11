@@ -77,6 +77,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         sidepanel: path.join(extensionRoot, "sidepanel.html"),
+        monitor: path.join(extensionRoot, "monitor.html"),
         offscreen: path.join(extensionRoot, "offscreen.html"),
         background: path.join(extensionRoot, "background-v3.ts")
       },
